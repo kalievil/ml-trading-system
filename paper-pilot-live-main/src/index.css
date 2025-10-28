@@ -1,0 +1,133 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+
+    --card: 224 37% 15%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 224 37% 15%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 189 95% 52%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 220 15% 25%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 220 15% 20%;
+    --muted-foreground: 217 10% 65%;
+
+    --accent: 189 95% 52%;
+    --accent-foreground: 222 47% 11%;
+
+    --success: 142 76% 45%;
+    --success-foreground: 210 40% 98%;
+
+    --danger: 0 84% 60%;
+    --danger-foreground: 210 40% 98%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 220 15% 25%;
+    --input: 220 15% 25%;
+    --ring: 189 95% 52%;
+
+    --chart-1: 189 95% 52%;
+    --chart-2: 142 76% 45%;
+    --chart-3: 0 84% 60%;
+    --chart-4: 45 93% 58%;
+    --chart-5: 280 80% 65%;
+
+    --radius: 0.5rem;
+
+    /* Trading specific colors */
+    --profit: 142 76% 45%;
+    --loss: 0 84% 60%;
+    --long: 142 76% 45%;
+    --short: 0 84% 60%;
+    --neutral: 220 15% 50%;
+    
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(189 95% 52%) 0%, hsl(220 95% 60%) 100%);
+    --gradient-success: linear-gradient(135deg, hsl(142 76% 45%) 0%, hsl(142 76% 35%) 100%);
+    --gradient-danger: linear-gradient(135deg, hsl(0 84% 60%) 0%, hsl(0 84% 50%) 100%);
+    
+    /* Shadows */
+    --shadow-glow: 0 0 20px hsl(189 95% 52% / 0.3);
+    --shadow-card: 0 4px 6px -1px hsl(0 0% 0% / 0.3);
+    
+    /* Transitions */
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+  
+  /* Trading-specific utilities */
+  .profit-text {
+    @apply text-[hsl(var(--profit))];
+  }
+  
+  .loss-text {
+    @apply text-[hsl(var(--loss))];
+  }
+  
+  .long-bg {
+    @apply bg-[hsl(var(--long)/0.1)] border-[hsl(var(--long)/0.3)];
+  }
+  
+  .short-bg {
+    @apply bg-[hsl(var(--short)/0.1)] border-[hsl(var(--short)/0.3)];
+  }
+  
+  .mono-nums {
+    font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+  }
+  
+  /* Animations */
+  @keyframes pulse-glow {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.6;
+    }
+  }
+  
+  .animate-pulse-glow {
+    animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  .animate-slide-up {
+    animation: slide-up 0.3s ease-out;
+  }
+}

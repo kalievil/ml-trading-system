@@ -1,0 +1,18 @@
+[
+  "returns",
+  "volatility", 
+  "rsi",
+  "bb_position",
+  "sma_5",
+  "sma_20",
+  "ema_12",
+  "ema_26",
+  "macd",
+  "macd_signal",
+  "macd_histogram",
+  "volume_sma",
+  "volume_ratio",
+  "price_vs_sma5",
+  "price_vs_sma20",
+  "volatility_ratio"
+]
