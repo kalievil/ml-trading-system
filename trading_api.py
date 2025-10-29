@@ -338,6 +338,12 @@ def get_ml_signal():
 
 # API Endpoints
 
+@app.get("/")
+async def root():
+    """Root endpoint - redirects to API documentation"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/docs")
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
@@ -761,5 +767,15 @@ async def get_trading_performance():
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ML Trading API Server...")
-    uvicorn.run("trading_api:app", host="0.0.0.0", port=8000, reload=True)
+    # Get port from environment variable (required for Render)
+    # Default to 8000 for local development
+    port = int(os.environ.get("PORT", 8000))
+    
+    # Only enable reload in development (not in production)
+    # Render sets RENDER env var, we can use that or disable reload entirely for production
+    reload = os.environ.get("ENVIRONMENT") != "production" and os.environ.get("RENDER") != "true"
+    
+    logger.info(f"🚀 Starting ML Trading API Server on port {port}...")
+    logger.info(f"📝 Reload enabled: {reload}")
+    
+    uvicorn.run("trading_api:app", host="0.0.0.0", port=port, reload=reload)
