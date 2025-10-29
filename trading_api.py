@@ -17,7 +17,7 @@ from typing import Dict, Any, Optional
 
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
@@ -49,6 +49,19 @@ auto_trading_thread = None
 
 # Credentials file path
 CREDENTIALS_FILE = Path("binance_credentials.json")
+
+# Render outbound IP addresses (from Render dashboard)
+# These IPs need to be whitelisted on Binance for the API to work
+RENDER_IP_ADDRESSES = [
+    "44.226.145.213",
+    "54.187.200.255",
+    "34.213.214.55",
+    "35.164.95.156",
+    "44.230.95.183",
+    "44.229.200.200",
+    "74.220.48.0/24",
+    "74.220.56.0/24"
+]
 
 # Pydantic models
 class BinanceConfig(BaseModel):
@@ -83,6 +96,38 @@ class TradingSignal(BaseModel):
     leverage: float
     timestamp: str
     reason: str
+
+def get_current_server_ip():
+    """Get the current server's public IP address
+    
+    Returns:
+        str: Public IP address or None if unavailable
+    """
+    try:
+        import urllib.request
+        import urllib.error
+        
+        # Try multiple services for reliability
+        services = [
+            "https://api.ipify.org",
+            "https://checkip.amazonaws.com",
+            "https://ifconfig.me/ip"
+        ]
+        
+        for service in services:
+            try:
+                with urllib.request.urlopen(service, timeout=5) as response:
+                    ip = response.read().decode('utf-8').strip()
+                    if ip and len(ip) > 0:
+                        logger.info(f"🌐 Current server IP: {ip}")
+                        return ip
+            except (urllib.error.URLError, urllib.error.HTTPError, Exception) as e:
+                continue
+        
+        return None
+    except Exception as e:
+        logger.warning(f"⚠️ Could not determine server IP: {e}")
+        return None
 
 def load_credentials_from_file():
     """Load credentials from file"""
@@ -374,6 +419,35 @@ async def health_check():
         "credentials_file_path": str(CREDENTIALS_FILE)
     }
 
+@app.get("/api/server-ips")
+async def get_server_ips():
+    """Get Render server IP addresses for Binance whitelisting
+    
+    Returns the IP addresses that need to be whitelisted on Binance
+    for the API to work from Render.
+    """
+    current_ip = get_current_server_ip()
+    
+    return {
+        "render_ip_addresses": RENDER_IP_ADDRESSES,
+        "current_server_ip": current_ip,
+        "instructions": {
+            "step_1": "Go to https://testnet.binancefuture.com/en/my/settings/api-management",
+            "step_2": "Edit your API key",
+            "step_3": "Enable 'Restrict access to trusted IPs only' (if available)",
+            "step_4": "Add all IP addresses listed in 'render_ip_addresses'",
+            "step_5": "Save and try connecting again",
+            "note": "You may need to add individual IPs (not CIDR ranges) depending on Binance's interface"
+        },
+        "individual_ips": [
+            ip for ip in RENDER_IP_ADDRESSES if "/" not in ip
+        ],
+        "ip_ranges": [
+            ip for ip in RENDER_IP_ADDRESSES if "/" in ip
+        ],
+        "testnet_url": "https://testnet.binancefuture.com/en/my/settings/api-management"
+    }
+
 @app.post("/api/configure-binance")
 async def configure_binance(config: BinanceConfig):
     """Configure Binance Testnet API credentials
@@ -465,14 +539,30 @@ async def configure_binance(config: BinanceConfig):
                 error_detail += "The secret appears to be duplicated (contains the same sequence twice). "
             error_detail += "Please verify your API secret matches the API key. Common issues: wrong secret, duplicated secret, or extra characters."
         elif "restricted location" in error_detail or "service unavailable" in error_detail or "eligibility" in error_detail:
+            # Get current server IP for whitelisting instructions
+            current_ip = get_current_server_ip()
+            ip_list = ", ".join(RENDER_IP_ADDRESSES[:6])  # Show individual IPs
+            
             error_detail = (
-                "⚠️ Binance Geo-Restriction: Binance Testnet is blocking requests from Render's IP addresses. "
-                "This is a Binance policy restriction, not an issue with your code. "
-                "**Solutions:**\n"
-                "1. Run the API locally on your machine (works perfectly)\n"
-                "2. Use a VPS in an allowed region (AWS, DigitalOcean, etc.)\n"
-                "3. Contact Binance support about IP whitelisting for cloud providers\n"
-                "**Note:** This is a known limitation of Binance Testnet with cloud hosting."
+                "⚠️ Binance Geo-Restriction: Binance Testnet is blocking requests from Render's IP addresses.\n\n"
+                "**Solution: Whitelist Render IPs on Binance:**\n"
+                "1. Go to https://testnet.binancefuture.com/en/my/settings/api-management\n"
+                "2. Edit your API key\n"
+                "3. Enable 'Restrict access to trusted IPs only'\n"
+                "4. Add these Render IP addresses:\n"
+            )
+            error_detail += f"   {ip_list}\n"
+            error_detail += "   (Full list available at: /api/server-ips)\n\n"
+            
+            if current_ip:
+                error_detail += f"**Current server IP detected:** {current_ip}\n"
+                error_detail += "Make sure this IP is whitelisted on Binance.\n\n"
+            
+            error_detail += (
+                "**Alternative Solutions:**\n"
+                "- Run the API locally on your machine (works perfectly)\n"
+                "- Use a VPS in an allowed region (AWS, DigitalOcean, etc.)\n"
+                "- Contact Binance support if IP whitelisting doesn't resolve the issue\n"
             )
         
         logger.error(f"❌ Error configuring Binance: {error_detail}")
