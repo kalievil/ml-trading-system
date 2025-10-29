@@ -168,6 +168,24 @@ def initialize_binance_client(api_key: str, api_secret: str):
         
     except Exception as e:
         error_msg = str(e)
+        error_str_lower = error_msg.lower()
+        
+        # Check for geo-restriction errors
+        if "restricted location" in error_str_lower or "service unavailable" in error_str_lower:
+            error_msg = (
+                "Binance Testnet is blocking requests from this location (IP-based restriction). "
+                "This is common with cloud hosting providers like Render. "
+                "Solutions: 1) Run the API locally, 2) Use a VPS in an allowed region, "
+                "3) Contact Binance support about IP whitelisting."
+            )
+        elif "eligibility" in error_str_lower or "terms" in error_str_lower:
+            error_msg = (
+                "Binance Testnet has geo-restrictions that block cloud hosting providers. "
+                "The service is working correctly, but Binance is rejecting connections from Render's IP addresses. "
+                "Consider: 1) Running locally, 2) Using a different hosting provider, "
+                "3) Contacting Binance about IP restrictions."
+            )
+        
         logger.error(f"❌ Failed to initialize Binance client: {error_msg}")
         binance_client = None
         return False, error_msg
@@ -446,6 +464,16 @@ async def configure_binance(config: BinanceConfig):
             if len(api_secret) >= 128:
                 error_detail += "The secret appears to be duplicated (contains the same sequence twice). "
             error_detail += "Please verify your API secret matches the API key. Common issues: wrong secret, duplicated secret, or extra characters."
+        elif "restricted location" in error_detail or "service unavailable" in error_detail or "eligibility" in error_detail:
+            error_detail = (
+                "⚠️ Binance Geo-Restriction: Binance Testnet is blocking requests from Render's IP addresses. "
+                "This is a Binance policy restriction, not an issue with your code. "
+                "**Solutions:**\n"
+                "1. Run the API locally on your machine (works perfectly)\n"
+                "2. Use a VPS in an allowed region (AWS, DigitalOcean, etc.)\n"
+                "3. Contact Binance support about IP whitelisting for cloud providers\n"
+                "**Note:** This is a known limitation of Binance Testnet with cloud hosting."
+            )
         
         logger.error(f"❌ Error configuring Binance: {error_detail}")
         raise HTTPException(
