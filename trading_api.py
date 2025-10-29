@@ -19,7 +19,7 @@ import pandas as pd
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 # Import your ML algorithm
@@ -52,8 +52,25 @@ CREDENTIALS_FILE = Path("binance_credentials.json")
 
 # Pydantic models
 class BinanceConfig(BaseModel):
-    api_key: str
-    api_secret: str
+    """Binance API configuration
+    
+    Note: This endpoint uses Binance TESTNET. Get your testnet API keys from:
+    https://testnet.binancefuture.com/
+    
+    API keys are typically 64 characters long.
+    """
+    api_key: str = Field(
+        ...,
+        min_length=20,
+        description="Binance Testnet API Key (typically 64 characters). Get from https://testnet.binancefuture.com/",
+        example="YourBinanceTestnetAPIKeyHere64CharactersLong123456789012345678901234567890"
+    )
+    api_secret: str = Field(
+        ...,
+        min_length=20,
+        description="Binance Testnet API Secret (typically 64 characters). Get from https://testnet.binancefuture.com/",
+        example="YourBinanceTestnetAPISecretHere64CharactersLong123456789012345678901234567890"
+    )
 
 class TradingSignal(BaseModel):
     symbol: str
@@ -100,10 +117,42 @@ def save_credentials_to_file(api_key: str, api_secret: str):
         return False
 
 def initialize_binance_client(api_key: str, api_secret: str):
-    """Initialize Binance client"""
+    """Initialize Binance client
+    
+    Returns:
+        tuple: (success: bool, error_message: str or None)
+    """
     global binance_client
     try:
         from binance.client import Client
+        
+        # Validate API key format (should be non-empty strings)
+        if not api_key or not api_secret:
+            error_msg = "API key and API secret cannot be empty"
+            logger.error(f"❌ Failed to initialize Binance client: {error_msg}")
+            binance_client = None
+            return False, error_msg
+        
+        # Check for duplicated API secret (common copy/paste error)
+        # Binance secrets are typically 64 characters
+        if len(api_secret) >= 128:
+            # Check if it's duplicated (first half == second half)
+            midpoint = len(api_secret) // 2
+            first_half = api_secret[:midpoint]
+            second_half = api_secret[midpoint:midpoint*2] if len(api_secret) >= midpoint*2 else ""
+            
+            if first_half == second_half:
+                logger.warning(f"⚠️ Detected duplicated API secret (length: {len(api_secret)}). Using first half only.")
+                api_secret = first_half
+            elif len(api_secret) > 100:
+                # Secret is suspiciously long, take first 64 characters
+                logger.warning(f"⚠️ API secret is very long ({len(api_secret)} chars). Using first 64 characters.")
+                api_secret = api_secret[:64]
+        
+        # Also check API key length (should be around 64)
+        if len(api_key) > 100:
+            logger.warning(f"⚠️ API key is very long ({len(api_key)} chars). Using first 64 characters.")
+            api_key = api_key[:64]
         
         # Use testnet
         binance_client = Client(
@@ -115,12 +164,13 @@ def initialize_binance_client(api_key: str, api_secret: str):
         # Test connection
         account_info = binance_client.get_account()
         logger.info(f"✅ Binance API connected - Account type: {account_info.get('accountType', 'UNKNOWN')}")
-        return True
+        return True, None
         
     except Exception as e:
-        logger.error(f"❌ Failed to initialize Binance client: {e}")
+        error_msg = str(e)
+        logger.error(f"❌ Failed to initialize Binance client: {error_msg}")
         binance_client = None
-        return False
+        return False, error_msg
 
 def initialize_ml_system():
     """Initialize ML system"""
@@ -148,10 +198,11 @@ async def startup_event():
         # Initialize Binance client
         logger.info("🔧 Initializing Binance client...")
         logger.info("🔧 Testing Binance connection...")
-        if initialize_binance_client(api_key, api_secret):
+        success, error_msg = initialize_binance_client(api_key, api_secret)
+        if success:
             logger.info("✅ Binance API auto-configured from credentials file")
         else:
-            logger.error("❌ Failed to configure Binance API")
+            logger.error(f"❌ Failed to configure Binance API: {error_msg}")
     
     # Initialize ML system
     logger.info("🤖 Initializing ML system...")
@@ -301,25 +352,100 @@ async def health_check():
 
 @app.post("/api/configure-binance")
 async def configure_binance(config: BinanceConfig):
-    """Configure Binance API"""
+    """Configure Binance Testnet API credentials
+    
+    This endpoint configures the Binance Testnet API connection.
+    
+    **Important Notes:**
+    - This endpoint uses **Binance TESTNET** (not live trading)
+    - Get your testnet API keys from: https://testnet.binancefuture.com/
+    - API keys should be approximately 64 characters long
+    - Credentials are saved to `binance_credentials.json` upon success
+    
+    **Common Issues:**
+    - Extra spaces: Automatically trimmed
+    - Duplicated secret: Automatically detected and fixed
+    - Wrong key format: Will return validation error with details
+    
+    Returns success status if connection is verified.
+    """
     global binance_client
     
-    try:
-        if initialize_binance_client(config.api_key, config.api_secret):
-            # Save credentials to file
-            save_credentials_to_file(config.api_key, config.api_secret)
-            
-            return {
-                "status": "success",
-                "message": "Binance API configured successfully",
-                "testnet": True
-            }
+    # Log that we received the request
+    logger.info("📥 Received Binance configuration request")
+    
+    # Trim whitespace (common issue: copy/paste includes spaces)
+    api_key = config.api_key.strip() if config.api_key else ""
+    api_secret = config.api_secret.strip() if config.api_secret else ""
+    
+    # Log what we received (before validation)
+    logger.info(f"📋 Received API key length: {len(api_key)} characters")
+    logger.info(f"📋 Received API secret length: {len(api_secret)} characters")
+    
+    # Validate input
+    if not api_key or not api_secret:
+        logger.warning("⚠️ Empty API key or secret provided")
+        raise HTTPException(
+            status_code=400, 
+            detail="API key and API secret are required"
+        )
+    
+    # Additional validation - Binance API keys are typically 64 characters
+    if len(api_key) < 20:
+        logger.warning(f"⚠️ API key too short: {len(api_key)} characters (expected ~64)")
+        raise HTTPException(
+            status_code=400,
+            detail=f"API key appears too short ({len(api_key)} characters). Binance API keys are typically 64 characters long."
+        )
+    
+    if len(api_secret) < 20:
+        logger.warning(f"⚠️ API secret too short: {len(api_secret)} characters (expected ~64)")
+        raise HTTPException(
+            status_code=400,
+            detail=f"API secret appears too short ({len(api_secret)} characters). Binance API secrets are typically 64 characters long."
+        )
+    
+    # Log partial key for debugging (first 10 chars only for security)
+    logger.info(f"🔑 Attempting to configure Binance API with key: {api_key[:10]}... (length: {len(api_key)})")
+    
+    # Try to initialize Binance client
+    success, error_msg = initialize_binance_client(api_key, api_secret)
+    
+    if success:
+        # Save credentials to file (using trimmed values)
+        if save_credentials_to_file(api_key, api_secret):
+            logger.info("✅ Credentials saved to file")
         else:
-            raise HTTPException(status_code=400, detail="Failed to connect to Binance API")
-            
-    except Exception as e:
-        logger.error(f"❌ Error configuring Binance: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+            logger.warning("⚠️ Failed to save credentials to file, but connection successful")
+        
+        return {
+            "status": "success",
+            "message": "Binance API configured successfully",
+            "testnet": True
+        }
+    else:
+        # Return detailed error message
+        error_detail = error_msg or "Failed to connect to Binance API"
+        
+        # Provide more user-friendly error messages with diagnostic info
+        if "API-key format invalid" in error_detail or "-2014" in error_detail:
+            error_detail = f"API key format is invalid. Received key length: {len(api_key)} characters. "
+            error_detail += "Binance API keys are typically 64 characters. "
+            error_detail += "Common issues: extra spaces, incomplete copy/paste, or wrong key. "
+            error_detail += "Please double-check your API key from Binance Testnet."
+        elif "Invalid API-key" in error_detail or "-2015" in error_detail:
+            error_detail = f"Invalid API key (length: {len(api_key)}). The key may be incorrect or not have the required permissions."
+        elif "Signature" in error_detail or "-1022" in error_detail:
+            error_detail = f"Invalid API secret signature (secret length: {len(api_secret)}). "
+            if len(api_secret) >= 128:
+                error_detail += "The secret appears to be duplicated (contains the same sequence twice). "
+            error_detail += "Please verify your API secret matches the API key. Common issues: wrong secret, duplicated secret, or extra characters."
+        
+        logger.error(f"❌ Error configuring Binance: {error_detail}")
+        raise HTTPException(
+            status_code=400,
+            detail=error_detail
+        )
 
 @app.get("/api/ml-signal")
 async def get_ml_signal_endpoint():
@@ -498,20 +624,9 @@ async def get_trading_performance():
         # Get account info
         account = binance_client.get_account()
         
-        # Get trade history
-        trades = binance_client.get_my_trades(symbol='BTCUSDT', limit=1000)
-        
-        # Calculate performance metrics
-        total_trades = len(trades)
-        profitable_trades = 0
-        losing_trades = 0
-        total_pnl = 0.0
-        
-        # Simple P&L calculation (would need more sophisticated logic for real implementation)
-        for trade in trades:
-            if trade['isBuyer']:
-                # This is a simplified calculation
-                pass
+        # Get trade history (sorted by time, oldest first)
+        all_trades = binance_client.get_my_trades(symbol='BTCUSDT', limit=1000)
+        trades = sorted(all_trades, key=lambda x: x['time'])
         
         # Get current balances
         btc_balance = 0.0
@@ -519,28 +634,126 @@ async def get_trading_performance():
         
         for balance in account['balances']:
             if balance['asset'] == 'BTC':
-                btc_balance = float(balance['free'])
+                btc_balance = float(balance['free']) + float(balance['locked'])
             elif balance['asset'] == 'USDT':
-                usdt_balance = float(balance['free'])
+                usdt_balance = float(balance['free']) + float(balance['locked'])
         
         # Get current BTC price
         ticker = binance_client.get_ticker(symbol='BTCUSDT')
         current_price = float(ticker['lastPrice'])
         
+        # Calculate P&L by matching buy/sell pairs (FIFO method)
+        buy_stack = []  # Stack of buy orders (quantity, price)
+        completed_trades = []  # List of completed trade pairs (buy_price, sell_price, quantity, pnl, timestamp)
+        total_realized_pnl = 0.0
+        total_commission_paid = 0.0
+        today = datetime.now().date()
+        daily_realized_pnl = 0.0
+        
+        for trade in trades:
+            quantity = float(trade['qty'])
+            price = float(trade['price'])
+            commission = float(trade['commission'])
+            trade_time = datetime.fromtimestamp(trade['time'] / 1000)
+            is_today = trade_time.date() == today
+            total_commission_paid += commission
+            
+            if trade['isBuyer']:
+                # This is a BUY order
+                buy_stack.append({'quantity': quantity, 'price': price})
+            else:
+                # This is a SELL order - match with buy orders
+                remaining_sell_qty = quantity
+                
+                while remaining_sell_qty > 0 and buy_stack:
+                    buy = buy_stack[0]
+                    sell_qty = min(remaining_sell_qty, buy['quantity'])
+                    
+                    # Calculate P&L for this trade pair
+                    pnl = (price - buy['price']) * sell_qty
+                    total_realized_pnl += pnl
+                    
+                    # Track daily P&L
+                    if is_today:
+                        daily_realized_pnl += pnl
+                    
+                    completed_trades.append({
+                        'buy_price': buy['price'],
+                        'sell_price': price,
+                        'quantity': sell_qty,
+                        'pnl': pnl,
+                        'timestamp': trade_time.isoformat()
+                    })
+                    
+                    # Update buy stack
+                    buy['quantity'] -= sell_qty
+                    if buy['quantity'] <= 0:
+                        buy_stack.pop(0)
+                    
+                    remaining_sell_qty -= sell_qty
+        
+        # Calculate unrealized P&L for remaining BTC holdings
+        unrealized_pnl = 0.0
+        if btc_balance > 0 and buy_stack:
+            # Calculate average buy price for remaining BTC
+            total_btc_cost = 0.0
+            total_btc_qty = 0.0
+            
+            for buy in buy_stack:
+                total_btc_cost += buy['price'] * buy['quantity']
+                total_btc_qty += buy['quantity']
+            
+            if total_btc_qty > 0:
+                avg_buy_price = total_btc_cost / total_btc_qty
+                # Use actual BTC balance if it's less than what's in the stack (some might have been traded elsewhere)
+                actual_btc = min(btc_balance, total_btc_qty)
+                unrealized_pnl = (current_price - avg_buy_price) * actual_btc
+        
+        # Calculate win/loss statistics
+        profitable_trades = 0
+        losing_trades = 0
+        winning_pnls = []
+        losing_pnls = []
+        
+        for trade in completed_trades:
+            pnl = trade['pnl']
+            if pnl > 0:
+                profitable_trades += 1
+                winning_pnls.append(pnl)
+            elif pnl < 0:
+                losing_trades += 1
+                losing_pnls.append(pnl)
+        
+        # Calculate averages
+        average_win = sum(winning_pnls) / len(winning_pnls) if winning_pnls else 0.0
+        average_loss = sum(losing_pnls) / len(losing_pnls) if losing_pnls else 0.0
+        
+        # Total P&L (realized + unrealized, minus commissions)
+        total_pnl = total_realized_pnl + unrealized_pnl - total_commission_paid
+        
+        # Calculate return percentage (approximate, would need initial balance for exact calculation)
         total_wallet_balance = usdt_balance + (btc_balance * current_price)
         
+        completed_trade_count = len(completed_trades)
+        win_rate = (profitable_trades / completed_trade_count * 100) if completed_trade_count > 0 else 0.0
+        
         return {
-            "total_pnl": total_pnl,
-            "unrealized_pnl": 0.0,  # Would need position tracking
-            "win_rate_percent": (profitable_trades / max(total_trades, 1)) * 100,
-            "total_trades": total_trades,
+            "total_pnl": round(total_pnl, 2),
+            "realized_pnl": round(total_realized_pnl, 2),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "total_commission_paid": round(total_commission_paid, 6),
+            "win_rate_percent": round(win_rate, 2),
+            "total_trades": len(trades),
+            "completed_trades": completed_trade_count,
             "profitable_trades": profitable_trades,
             "losing_trades": losing_trades,
-            "average_win": 0.0,  # Would need calculation
-            "average_loss": 0.0,  # Would need calculation
-            "total_return_percent": 0.0,  # Would need initial balance tracking
-            "daily_return_percent": 0.0,
-            "completed_trades": profitable_trades + losing_trades
+            "average_win": round(average_win, 2),
+            "average_loss": round(average_loss, 2),
+            "current_btc_balance": round(btc_balance, 8),
+            "current_usdt_balance": round(usdt_balance, 2),
+            "total_wallet_balance": round(total_wallet_balance, 2),
+            "current_btc_price": round(current_price, 2),
+            "daily_return_percent": round((daily_realized_pnl / max(total_wallet_balance, 1)) * 100, 2) if total_wallet_balance > 0 else 0.0
         }
         
     except Exception as e:
