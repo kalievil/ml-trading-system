@@ -302,20 +302,70 @@ def automatic_trading_loop():
                 logger.info(f"🎯 Auto-trading: {signal_data['signal']} signal with {signal_data['confidence']:.1%} confidence")
                 
                 try:
+                    # Get current account balance
+                    account = binance_client.get_account()
+                    usdt_balance = 0.0
+                    btc_balance = 0.0
+                    
+                    for balance in account['balances']:
+                        if balance['asset'] == 'USDT':
+                            usdt_balance = float(balance['free'])
+                        elif balance['asset'] == 'BTC':
+                            btc_balance = float(balance['free'])
+                    
+                    # Get current BTC price
+                    ticker = binance_client.get_ticker(symbol='BTCUSDT')
+                    current_price = float(ticker['lastPrice'])
+                    
                     # Execute trade based on signal
                     if signal_data['signal'] == 'BUY':
+                        # position_size is a percentage (0.30 = 30% of portfolio)
+                        # Calculate USDT amount to use
+                        portfolio_value = usdt_balance + (btc_balance * current_price)
+                        usdt_to_spend = portfolio_value * signal_data['position_size']
+                        
+                        # Ensure we have enough USDT
+                        if usdt_to_spend > usdt_balance:
+                            logger.warning(f"⚠️ Insufficient USDT. Need {usdt_to_spend:.2f} USDT, have {usdt_balance:.2f} USDT")
+                            usdt_to_spend = usdt_balance * 0.99  # Use 99% to leave some for fees
+                        
+                        # Calculate BTC quantity from USDT amount
+                        btc_quantity = usdt_to_spend / current_price
+                        
+                        # Check minimum order size (Binance minimum is typically 10 USDT or 0.00001 BTC)
+                        if usdt_to_spend < 10:
+                            logger.warning(f"⚠️ Order size too small: {usdt_to_spend:.2f} USDT (minimum 10 USDT)")
+                            time.sleep(10)
+                            continue
+                        
+                        # Execute BUY order
                         order = binance_client.order_market_buy(
                             symbol='BTCUSDT',
-                            quantity=f"{signal_data['position_size']:.6f}"
+                            quoteOrderQty=f"{usdt_to_spend:.2f}"  # Use quoteOrderQty (USDT amount) instead of quantity
                         )
-                        logger.info(f"✅ Auto-executed BUY order: {order['orderId']}")
+                        logger.info(f"✅ Auto-executed BUY order: {order['orderId']} - {usdt_to_spend:.2f} USDT (~{btc_quantity:.6f} BTC)")
                     
                     elif signal_data['signal'] == 'SELL':
+                        # For SELL, position_size is percentage of BTC holdings
+                        btc_to_sell = btc_balance * signal_data['position_size']
+                        
+                        # Ensure we have BTC to sell
+                        if btc_to_sell > btc_balance:
+                            logger.warning(f"⚠️ Insufficient BTC. Need {btc_to_sell:.6f} BTC, have {btc_balance:.6f} BTC")
+                            btc_to_sell = btc_balance * 0.99  # Use 99% to leave some
+                        
+                        # Check minimum order size
+                        if btc_to_sell < 0.00001:
+                            logger.warning(f"⚠️ Order size too small: {btc_to_sell:.6f} BTC (minimum 0.00001 BTC)")
+                            time.sleep(10)
+                            continue
+                        
+                        # Execute SELL order
                         order = binance_client.order_market_sell(
                             symbol='BTCUSDT',
-                            quantity=f"{signal_data['position_size']:.6f}"
+                            quantity=f"{btc_to_sell:.6f}"
                         )
-                        logger.info(f"✅ Auto-executed SELL order: {order['orderId']}")
+                        logger.info(f"✅ Auto-executed SELL order: {order['orderId']} - {btc_to_sell:.6f} BTC (~{btc_to_sell * current_price:.2f} USDT)")
                     
                 except Exception as trade_error:
                     logger.error(f"❌ Auto-trade execution failed: {trade_error}")
