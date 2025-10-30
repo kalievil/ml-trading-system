@@ -4,6 +4,10 @@ import Dashboard from "@/components/trading/Dashboard";
 import ChartView from "@/components/trading/ChartView";
 import PositionsPanel from "@/components/trading/PositionsPanel";
 import TradeHistory from "@/components/trading/TradeHistory";
+import Signals from "@/components/trading/Signals";
+import AutoTrading from "@/components/trading/AutoTrading";
+import TrackedPositions from "@/components/trading/TrackedPositions";
+import ManualTrade from "@/components/trading/ManualTrade";
 import AlgorithmStatus from "@/components/trading/AlgorithmStatus";
 import ApiSettings from "@/components/trading/ApiSettings";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -59,14 +63,22 @@ const Index = () => {
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
           <TabsList className="bg-card border border-border">
             <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
+            <TabsTrigger value="signals">Signals</TabsTrigger>
             <TabsTrigger value="chart">Chart</TabsTrigger>
             <TabsTrigger value="positions">Positions</TabsTrigger>
+            <TabsTrigger value="tracked">Tracked Positions</TabsTrigger>
+            <TabsTrigger value="autotrading">Auto-Trading</TabsTrigger>
             <TabsTrigger value="history">History</TabsTrigger>
+            <TabsTrigger value="manual">Manual Trade</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
 
           <TabsContent value="dashboard" className="space-y-6 animate-slide-up">
             <Dashboard />
+          </TabsContent>
+
+          <TabsContent value="signals" className="space-y-6 animate-slide-up">
+            <Signals />
           </TabsContent>
 
           <TabsContent value="chart" className="space-y-6 animate-slide-up">
@@ -77,8 +89,20 @@ const Index = () => {
             <PositionsPanel />
           </TabsContent>
 
+          <TabsContent value="tracked" className="space-y-6 animate-slide-up">
+            <TrackedPositions />
+          </TabsContent>
+
+          <TabsContent value="autotrading" className="space-y-6 animate-slide-up">
+            <AutoTrading />
+          </TabsContent>
+
           <TabsContent value="history" className="space-y-6 animate-slide-up">
             <TradeHistory />
+          </TabsContent>
+
+          <TabsContent value="manual" className="space-y-6 animate-slide-up">
+            <ManualTrade />
           </TabsContent>
 
           <TabsContent value="settings" className="space-y-6 animate-slide-up">

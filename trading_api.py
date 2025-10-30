@@ -540,12 +540,21 @@ def get_ml_signal():
             'open_time','open','high','low','close','volume','close_time','qav','num_trades','taker_base','taker_quote','ignore'
         ])
         df = df[['open_time','open','high','low','close','volume']].copy()
-        df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
+        # Ensure only one timestamp column exists later when renaming
+        # Create a temporary column to avoid duplicate 'timestamp' labels
+        df['kline_timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
         for col in ['open','high','low','close','volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df = df.dropna()
         # Use the strategy feature engineering
-        df_features = ml_system.create_features(df.rename(columns={'open_time':'timestamp'}))
+        # Build dataframe with a proper datetime 'timestamp' column expected by the feature builder
+        df_renamed = df.copy()
+        df_renamed['timestamp'] = df_renamed['kline_timestamp']  # ensure datetime dtype
+        # Drop helper/original columns to avoid confusion
+        drop_cols = [c for c in ['kline_timestamp', 'open_time'] if c in df_renamed.columns]
+        if drop_cols:
+            df_renamed = df_renamed.drop(columns=drop_cols)
+        df_features = ml_system.create_features(df_renamed)
         if df_features is None or len(df_features) == 0:
             raise RuntimeError("Feature creation returned empty dataframe")
         # Extract latest feature row

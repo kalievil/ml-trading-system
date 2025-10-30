@@ -219,6 +219,29 @@ export const useTradingAPI = () => {
     }
   };
 
+  // Manual trade (BUY by USDT or SELL by BTC or percentage)
+  const manualTrade = async (params: { side: 'BUY' | 'SELL'; amount_usdt?: number; amount_btc?: number; percentage?: number; }) => {
+    try {
+      setIsLoading(true);
+      setError(null);
+      const response = await fetch(`${API_BASE_URL}/api/manual-trade`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to execute manual trade');
+      }
+      return await response.json();
+    } catch (err: any) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Get account info
   const getAccountInfo = async (): Promise<AccountInfo> => {
     try {
@@ -246,7 +269,28 @@ export const useTradingAPI = () => {
         throw new Error(errorData.detail || 'Failed to get positions');
       }
 
-      return await response.json();
+      const raw = await response.json();
+      // Backend returns balances as pseudo-positions; map and filter to BTC only
+      const mapped = (raw || [])
+        .filter((p: any) => (p.symbol || '').toUpperCase().startsWith('BTC'))
+        .map((p: any) => {
+          const symbol = p.symbol || 'BTCUSDT';
+          const amount = Number(p.amount ?? 0);
+          const entry = Number(p.entry_price ?? p.current_price ?? 0);
+          const current = Number(p.current_price ?? entry);
+          const upnl = Number(p.unrealized_pnl ?? (current - entry) * amount);
+          const upnlPct = Number(p.unrealized_pnl_percent ?? (entry > 0 ? ((current - entry) / entry) * 100 : 0));
+          return {
+            symbol,
+            side: (p.side as any) || 'LONG',
+            amount,
+            entry_price: entry,
+            current_price: current,
+            unrealized_pnl: upnl,
+            unrealized_pnl_percent: upnlPct,
+          };
+        });
+      return mapped;
     } catch (err: any) {
       setError(err.message);
       return [];
@@ -263,7 +307,30 @@ export const useTradingAPI = () => {
         throw new Error(errorData.detail || 'Failed to get trade history');
       }
 
-      return await response.json();
+      const raw = await response.json();
+      // Map backend fields to UI-friendly shape expected by TradeHistory component
+      const mapped = (raw || []).map((t: any, idx: number) => {
+        const timeMs = typeof t.time === 'string' ? Date.parse(t.time) : (typeof t.time === 'number' ? t.time : Date.now());
+        const qty = Number(t.quantity ?? t.qty ?? 0);
+        const price = Number(t.price ?? 0);
+        return {
+          id: `${t.symbol || 'BTCUSDT'}-${timeMs}-${idx}`,
+          symbol: t.symbol || 'BTCUSDT',
+          side: t.side || (t.isBuyer ? 'BUY' : 'SELL'),
+          quantity: qty,
+          price: price,
+          commission: Number(t.commission ?? 0),
+          commission_asset: t.commission_asset || t.commissionAsset || 'USDT',
+          time: timeMs,
+          // Optional fields used by the table; backend doesn't provide these
+          entry_price: undefined,
+          exit_price: undefined,
+          pnl: null,
+          pnl_percent: null,
+          total_value: qty * price,
+        };
+      });
+      return mapped;
     } catch (err: any) {
       setError(err.message);
       return [];
@@ -280,7 +347,17 @@ export const useTradingAPI = () => {
         throw new Error(errorData.detail || 'Failed to get trading performance');
       }
 
-      return await response.json();
+      const raw = await response.json();
+      // Normalize backend fields to the UI's expected shape
+      const normalized = {
+        ...raw,
+        current_portfolio_value: raw.total_wallet_balance ?? raw.current_portfolio_value ?? 0,
+        btc_balance: raw.current_btc_balance ?? raw.btc_balance ?? 0,
+        usdt_balance: raw.current_usdt_balance ?? raw.usdt_balance ?? 0,
+        current_price: raw.current_btc_price ?? raw.current_price ?? 0,
+        total_return_percent: raw.total_return ?? raw.total_return_percent ?? 0,
+      };
+      return normalized;
     } catch (err: any) {
       setError(err.message);
       return null;
@@ -293,12 +370,13 @@ export const useTradingAPI = () => {
       setIsLoading(true);
       setError(null);
 
-      const response = await fetch(`${API_BASE_URL}/api/close-position`, {
+      // Use convert endpoint to sell BTC to USDT
+      const response = await fetch(`${API_BASE_URL}/api/convert-btc-to-usdt`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ symbol }),
+        body: JSON.stringify({ percent: 1.0 }),
       });
 
       if (!response.ok) {
@@ -306,7 +384,14 @@ export const useTradingAPI = () => {
         throw new Error(errorData.detail || 'Failed to close position');
       }
 
-      return await response.json();
+      const res = await response.json();
+      // Normalize for UI toast in PositionsPanel
+      return {
+        btc_sold: res.sold_btc ?? 0,
+        estimated_usdt_received: res.approx_usdt ?? 0,
+        order_id: res.order_id,
+        status: res.status,
+      };
     } catch (err: any) {
       setError(err.message);
       throw err;
@@ -411,6 +496,22 @@ export const useTradingAPI = () => {
     }
   };
 
+  // Get tracked positions (with SL/TP) from backend
+  const getTrackedPositions = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/open-positions`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to get tracked positions');
+      }
+      const data = await response.json();
+      return data?.tracked_positions ?? [];
+    } catch (err: any) {
+      setError(err.message);
+      return [];
+    }
+  };
+
   // Check API connection on mount
   useEffect(() => {
     const checkConnection = async () => {
@@ -455,6 +556,7 @@ export const useTradingAPI = () => {
     getTestSignal,
     executeTrade,
     executeTestTrade,
+    manualTrade,
     getAccountInfo,
     getPositions,
     getTradeHistory,
@@ -464,6 +566,7 @@ export const useTradingAPI = () => {
     getAutoTradingStatus,
     enableAutoTrading,
     disableAutoTrading,
+    getTrackedPositions,
     healthCheck,
   };
 };
