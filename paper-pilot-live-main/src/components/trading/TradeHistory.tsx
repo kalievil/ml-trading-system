@@ -3,7 +3,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RefreshCw, TrendingUp, TrendingDown, DollarSign } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "../../lib/utils.ts";
 import { useRealTradingData } from "@/hooks/useRealTradingData";
 
 const TradeHistory = () => {
@@ -84,10 +84,7 @@ const TradeHistory = () => {
                       <TableHead>Symbol</TableHead>
                       <TableHead>Type</TableHead>
                       <TableHead className="text-right">Quantity</TableHead>
-                      <TableHead className="text-right">Entry Price</TableHead>
-                      <TableHead className="text-right">Exit Price</TableHead>
-                      <TableHead className="text-right">P&L</TableHead>
-                      <TableHead className="text-right">P&L %</TableHead>
+                      <TableHead className="text-right">Price</TableHead>
                       <TableHead className="text-right">Total Value</TableHead>
                       <TableHead className="text-right">Commission</TableHead>
                     </TableRow>
@@ -113,33 +110,10 @@ const TradeHistory = () => {
                       {trade.quantity.toFixed(6)} BTC
                     </TableCell>
                     <TableCell className="text-right mono-nums">
-                      {trade.entry_price ? `$${trade.entry_price.toLocaleString()}` : '-'}
+                      ${trade.price.toLocaleString()}
                     </TableCell>
                     <TableCell className="text-right mono-nums">
-                      {trade.exit_price ? `$${trade.exit_price.toLocaleString()}` : '-'}
-                    </TableCell>
-                    <TableCell className={cn(
-                      "text-right mono-nums font-semibold",
-                      trade.pnl !== null ? (trade.pnl >= 0 ? "profit-text" : "loss-text") : ""
-                    )}>
-                      {trade.pnl !== null ? (
-                        <>
-                          {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
-                        </>
-                      ) : '-'}
-                    </TableCell>
-                    <TableCell className={cn(
-                      "text-right mono-nums font-semibold",
-                      trade.pnl_percent !== null ? (trade.pnl_percent >= 0 ? "profit-text" : "loss-text") : ""
-                    )}>
-                      {trade.pnl_percent !== null ? (
-                        <>
-                          {trade.pnl_percent >= 0 ? '+' : ''}{trade.pnl_percent.toFixed(2)}%
-                        </>
-                      ) : '-'}
-                    </TableCell>
-                    <TableCell className="text-right mono-nums">
-                      ${trade.total_value.toLocaleString()}
+                      ${(trade.quantity * trade.price).toLocaleString()}
                     </TableCell>
                     <TableCell className="text-right mono-nums">
                       {trade.commission.toFixed(6)} {trade.commission_asset}

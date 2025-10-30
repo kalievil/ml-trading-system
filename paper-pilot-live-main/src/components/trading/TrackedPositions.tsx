@@ -4,7 +4,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { RefreshCw } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "../../lib/utils.ts";
 import { useTradingAPI } from "@/hooks/useTradingAPI";
 
 interface TrackedPosition {
