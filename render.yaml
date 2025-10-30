@@ -1,14 +1,31 @@
 services:
   - type: web
-    name: ml-trading-system
+    name: ml-trading-api
     env: python
     plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python trading_api.py
     envVars:
+      - key: PORT
+        value: "8000"
       - key: BINANCE_API_KEY
         sync: false
       - key: BINANCE_API_SECRET
         sync: false
     healthCheckPath: /api/health
+    autoDeploy: true
+
+  - type: web
+    name: ml-trading-ui
+    env: static
+    buildCommand: cd paper-pilot-live-main && npm ci && npm run build
+    staticPublishPath: paper-pilot-live-main/dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+        # Set this to your API URL after deployment (e.g., https://ml-trading-api.onrender.com)
+    headers:
+      - path: /*
+        name: X-Robots-Tag
+        value: noindex
     autoDeploy: true
