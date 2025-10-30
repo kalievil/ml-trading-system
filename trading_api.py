@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
+import joblib
 
 # Import your ML algorithm
 from complete_high_return_optimized import OptimizedHighReturnSystem
@@ -46,6 +47,7 @@ binance_client = None
 ml_system = None
 auto_trading_enabled = False
 auto_trading_thread = None
+open_positions = {}  # Track open positions for stop-loss/take-profit
 
 # Credentials file path
 CREDENTIALS_FILE = Path("binance_credentials.json")
@@ -241,6 +243,32 @@ def initialize_ml_system():
     try:
         ml_system = OptimizedHighReturnSystem(max_leverage=5)
         logger.info("✅ ML system initialized successfully")
+        # Try to load saved scaler and models for live predictions
+        try:
+            models_path = Path("user_data/models")
+            scaler_path = models_path / "scaler.pkl"
+            if scaler_path.exists():
+                ml_system.scaler = joblib.load(scaler_path)
+                logger.info("🧪 Loaded scaler for live predictions")
+            # Load ensemble models if present
+            model_files = {
+                'xgboost_performance': models_path / 'xgboost_performance.pkl',
+                'xgboost_aggressive': models_path / 'xgboost_aggressive.pkl',
+                'xgboost_balanced': models_path / 'xgboost_balanced.pkl',
+            }
+            loaded_models = {}
+            for name, path in model_files.items():
+                if path.exists():
+                    loaded_models[name] = joblib.load(path)
+                    logger.info(f"🧪 Loaded model: {name}")
+            if loaded_models:
+                ml_system.models = loaded_models
+                # If ensemble weights not available, use equal weights
+                weight = 1.0 / len(loaded_models)
+                ml_system.ensemble_weights = {k: weight for k in loaded_models.keys()}
+                logger.info(f"🧪 Ensemble ready with weights: {ml_system.ensemble_weights}")
+        except Exception as model_e:
+            logger.warning(f"⚠️ Could not load saved models/scaler: {model_e}")
         return True
     except Exception as e:
         logger.error(f"❌ Failed to initialize ML system: {e}")
@@ -276,6 +304,90 @@ async def startup_event():
     
     logger.info("🌐 API Server ready!")
 
+def check_position_management_sync():
+    """Check and manage open positions for stop-loss/take-profit (sync version)"""
+    global open_positions, binance_client
+    
+    if not binance_client or not open_positions:
+        return
+    
+    try:
+        # Get current BTC price
+        ticker = binance_client.get_ticker(symbol='BTCUSDT')
+        current_price = float(ticker['lastPrice'])
+        
+        positions_to_close = []
+        
+        for position_id, position in open_positions.items():
+            entry_price = position['entry_price']
+            side = position['side']
+            stop_loss = position['stop_loss']
+            take_profit = position['take_profit']
+            
+            should_close = False
+            close_reason = ""
+            
+            if side == 'BUY':
+                # Long position
+                if current_price <= stop_loss:
+                    should_close = True
+                    close_reason = "stop_loss"
+                elif current_price >= take_profit:
+                    should_close = True
+                    close_reason = "take_profit"
+            else:
+                # Short position (if implemented)
+                if current_price >= stop_loss:
+                    should_close = True
+                    close_reason = "stop_loss"
+                elif current_price <= take_profit:
+                    should_close = True
+                    close_reason = "take_profit"
+            
+            if should_close:
+                positions_to_close.append((position_id, close_reason))
+        
+        # Close positions that hit stop-loss or take-profit
+        for position_id, reason in positions_to_close:
+            close_position_sync(position_id, reason)
+            
+    except Exception as e:
+        logger.error(f"❌ Position management error: {e}")
+
+def close_position_sync(position_id, reason):
+    """Close a specific position (sync version)"""
+    global open_positions, binance_client
+    
+    if position_id not in open_positions:
+        return
+    
+    position = open_positions[position_id]
+    
+    try:
+        # Get current account balance
+        account = binance_client.get_account()
+        btc_balance = 0.0
+        
+        for balance in account['balances']:
+            if balance['asset'] == 'BTC':
+                btc_balance = float(balance['free'])
+                break
+        
+        if btc_balance > 0:
+            # Execute SELL order
+            order = binance_client.order_market_sell(
+                symbol='BTCUSDT',
+                quantity=f"{btc_balance:.6f}"
+            )
+            
+            logger.info(f"✅ Position closed: {position_id} - {reason} - {btc_balance:.6f} BTC")
+            
+            # Remove from tracking
+            del open_positions[position_id]
+            
+    except Exception as e:
+        logger.error(f"❌ Error closing position {position_id}: {e}")
+
 def automatic_trading_loop():
     """Background loop for automatic ML trading"""
     global auto_trading_enabled, binance_client, ml_system
@@ -293,6 +405,10 @@ def automatic_trading_loop():
                 logger.warning("⚠️ ML system not available for auto trading")
                 time.sleep(60)
                 continue
+            
+            # Check for position management first (stop-loss/take-profit)
+            # Note: This is a sync function, so we'll call it directly
+            check_position_management_sync()
             
             # Get ML signal
             signal_data = get_ml_signal()
@@ -319,24 +435,17 @@ def automatic_trading_loop():
                     
                     # Execute trade based on signal
                     if signal_data['signal'] == 'BUY':
-                        # position_size is a percentage (0.30 = 30% of portfolio)
-                        # Calculate USDT amount to use
-                        portfolio_value = usdt_balance + (btc_balance * current_price)
-                        usdt_to_spend = portfolio_value * signal_data['position_size']
+                        # FIXED: Only use available USDT, not total portfolio value
+                        usdt_to_spend = usdt_balance * signal_data['position_size']
                         
-                        # Ensure we have enough USDT
-                        if usdt_to_spend > usdt_balance:
-                            logger.warning(f"⚠️ Insufficient USDT. Need {usdt_to_spend:.2f} USDT, have {usdt_balance:.2f} USDT")
-                            usdt_to_spend = usdt_balance * 0.99  # Use 99% to leave some for fees
-                        
-                        # Calculate BTC quantity from USDT amount
-                        btc_quantity = usdt_to_spend / current_price
-                        
-                        # Check minimum order size (Binance minimum is typically 10 USDT or 0.00001 BTC)
+                        # Check minimum order size (Binance minimum is typically 10 USDT)
                         if usdt_to_spend < 10:
                             logger.warning(f"⚠️ Order size too small: {usdt_to_spend:.2f} USDT (minimum 10 USDT)")
                             time.sleep(10)
                             continue
+                        
+                        # Calculate BTC quantity from USDT amount
+                        btc_quantity = usdt_to_spend / current_price
                         
                         # Execute BUY order
                         order = binance_client.order_market_buy(
@@ -344,6 +453,22 @@ def automatic_trading_loop():
                             quoteOrderQty=f"{usdt_to_spend:.2f}"  # Use quoteOrderQty (USDT amount) instead of quantity
                         )
                         logger.info(f"✅ Auto-executed BUY order: {order['orderId']} - {usdt_to_spend:.2f} USDT (~{btc_quantity:.6f} BTC)")
+                        
+                        # Track the position for stop-loss/take-profit management
+                        position_id = f"pos_{int(time.time())}"
+                        stop_loss_price = current_price * (1 - signal_data.get('stop_loss_pct', 0.018))  # 1.8% stop-loss
+                        take_profit_price = current_price * (1 + signal_data.get('take_profit_pct', 0.015))  # 1.5% take-profit
+                        
+                        open_positions[position_id] = {
+                            'side': 'BUY',
+                            'entry_price': current_price,
+                            'stop_loss': stop_loss_price,
+                            'take_profit': take_profit_price,
+                            'entry_time': datetime.now(),
+                            'order_id': order['orderId']
+                        }
+                        
+                        logger.info(f"📊 Position tracked: {position_id} - Entry: {current_price:.2f}, SL: {stop_loss_price:.2f}, TP: {take_profit_price:.2f}")
                     
                     elif signal_data['signal'] == 'SELL':
                         # For SELL, position_size is percentage of BTC holdings
@@ -406,27 +531,58 @@ def get_ml_signal():
                 'take_profit': 0.0
             }
         
-        # Get current BTC price
-        ticker = binance_client.get_ticker(symbol='BTCUSDT')
-        current_price = float(ticker['lastPrice'])
-        
-        # For now, return a simple signal based on ML system parameters
-        # In a real implementation, you would feed live data to the ML system
-        
-        # Simulate ML prediction (replace with actual ML prediction)
-        confidence = 0.75  # Simulated confidence
-        signal = 'BUY' if confidence > 0.63 else 'HOLD'
-        
-        # Calculate position size and risk parameters
-        position_size = ml_system.calculate_position_size(confidence, 0.02)  # 2% volatility
-        leverage = ml_system.calculate_dynamic_leverage(confidence, 0.02)
+        # Fetch live klines to build features matching the strategy
+        klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=max(ml_system.lookback_period + 50, 300))
+        if not klines:
+            raise RuntimeError("No klines returned from Binance")
+        # Build dataframe
+        df = pd.DataFrame(klines, columns=[
+            'open_time','open','high','low','close','volume','close_time','qav','num_trades','taker_base','taker_quote','ignore'
+        ])
+        df = df[['open_time','open','high','low','close','volume']].copy()
+        df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
+        for col in ['open','high','low','close','volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna()
+        # Use the strategy feature engineering
+        df_features = ml_system.create_features(df.rename(columns={'open_time':'timestamp'}))
+        if df_features is None or len(df_features) == 0:
+            raise RuntimeError("Feature creation returned empty dataframe")
+        # Extract latest feature row
+        feature_columns = [c for c in df_features.columns if c not in ['timestamp','target','open','high','low','close','volume']]
+        latest_row = df_features.iloc[-1]
+        X_row = latest_row[feature_columns].values.reshape(1, -1)
+        # Scale
+        if not hasattr(ml_system, 'scaler') or ml_system.scaler is None:
+            raise RuntimeError("Scaler not loaded. Train and save models first or provide scaler.pkl")
+        X_scaled = ml_system.scaler.transform(X_row)
+        # Predict via ensemble
+        if not hasattr(ml_system, 'models') or not ml_system.models:
+            raise RuntimeError("Models not loaded. Train and save models first or provide model pkl files")
+        probs_accum = None
+        for name, model in ml_system.models.items():
+            prob = model.predict_proba(X_scaled)
+            weight = ml_system.ensemble_weights.get(name, 1.0/len(ml_system.models))
+            probs_accum = prob * weight if probs_accum is None else probs_accum + prob * weight
+        # Determine class: 0=HOLD, 1=BUY, 2=SELL
+        cls_idx = int(np.argmax(probs_accum, axis=1)[0])
+        confidence = float(np.max(probs_accum, axis=1)[0])
+        signal_map = {0:'HOLD', 1:'BUY', 2:'SELL'}
+        signal = signal_map.get(cls_idx, 'HOLD')
+        # Volatility from features
+        volatility = float(latest_row.get('volatility', 0.02))
+        # Current price
+        current_price = float(df['close'].iloc[-1])
+        # Calculate position size and risk parameters from algorithm
+        position_size = float(ml_system.calculate_position_size(confidence, volatility))
+        leverage = float(ml_system.calculate_dynamic_leverage(confidence, volatility))
         stop_loss = current_price * (1 - ml_system.stop_loss_pct)
         take_profit = current_price * (1 + ml_system.take_profit_pct)
         
         return {
             'signal': signal,
             'confidence': confidence,
-            'reason': f'ML system prediction with {confidence:.1%} confidence',
+            'reason': f'Ensemble ML prediction with {confidence:.1%} confidence',
             'leverage': leverage,
             'position_size': position_size,
             'stop_loss': stop_loss,
@@ -762,6 +918,45 @@ async def get_positions():
         logger.error(f"❌ Error getting positions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/open-positions")
+async def get_open_positions():
+    """Get tracked open positions with stop-loss/take-profit info"""
+    global open_positions
+    
+    if not binance_client:
+        raise HTTPException(status_code=400, detail="Binance API not configured")
+    
+    try:
+        # Get current BTC price
+        ticker = binance_client.get_ticker(symbol='BTCUSDT')
+        current_price = float(ticker['lastPrice'])
+        
+        tracked_positions = []
+        for position_id, position in open_positions.items():
+            entry_price = position['entry_price']
+            current_pnl = (current_price - entry_price) / entry_price * 100
+            
+            tracked_positions.append({
+                "position_id": position_id,
+                "side": position['side'],
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "stop_loss": position['stop_loss'],
+                "take_profit": position['take_profit'],
+                "unrealized_pnl_percent": current_pnl,
+                "entry_time": position['entry_time'].isoformat(),
+                "order_id": position['order_id']
+            })
+        
+        return {
+            "tracked_positions": tracked_positions,
+            "total_positions": len(tracked_positions)
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error getting open positions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/trade-history")
 async def get_trade_history():
     """Get trade history"""
@@ -786,6 +981,149 @@ async def get_trade_history():
         
     except Exception as e:
         logger.error(f"❌ Error getting trade history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Pydantic models for manual trading
+class ManualTradeRequest(BaseModel):
+    side: str = Field(..., description="BUY or SELL")
+    amount_usdt: Optional[float] = Field(None, description="Amount in USDT (for BUY)")
+    amount_btc: Optional[float] = Field(None, description="Amount in BTC (for SELL)")
+    percentage: Optional[float] = Field(None, description="Percentage of available balance (0.1 = 10%)")
+
+class ConvertRequest(BaseModel):
+    percent: float = Field(0.25, description="Percentage of BTC to convert to USDT (0.25 = 25%)")
+
+@app.post("/api/manual-trade")
+async def manual_trade(request: ManualTradeRequest):
+    """Execute manual buy or sell order"""
+    if not binance_client:
+        raise HTTPException(status_code=400, detail="Binance API not configured")
+    
+    try:
+        # Get current account info
+        account = binance_client.get_account()
+        btc_balance = 0.0
+        usdt_balance = 0.0
+        
+        for balance in account['balances']:
+            if balance['asset'] == 'BTC':
+                btc_balance = float(balance['free'])
+            elif balance['asset'] == 'USDT':
+                usdt_balance = float(balance['free'])
+        
+        # Get current BTC price
+        ticker = binance_client.get_ticker(symbol='BTCUSDT')
+        current_price = float(ticker['lastPrice'])
+        
+        if request.side.upper() == 'BUY':
+            # Calculate USDT amount to spend
+            if request.percentage:
+                usdt_to_spend = usdt_balance * request.percentage
+            elif request.amount_usdt:
+                usdt_to_spend = request.amount_usdt
+            else:
+                raise HTTPException(status_code=400, detail="Must specify either amount_usdt or percentage for BUY")
+            
+            # Validate order size
+            if usdt_to_spend < 10:
+                raise HTTPException(status_code=400, detail=f"Order too small: {usdt_to_spend:.2f} USDT (minimum 10 USDT)")
+            
+            if usdt_to_spend > usdt_balance:
+                raise HTTPException(status_code=400, detail=f"Insufficient USDT. Need {usdt_to_spend:.2f}, have {usdt_balance:.2f}")
+            
+            # Execute BUY order
+            order = binance_client.order_market_buy(
+                symbol='BTCUSDT',
+                quoteOrderQty=f"{usdt_to_spend:.2f}"
+            )
+            
+            btc_quantity = usdt_to_spend / current_price
+            logger.info(f"✅ Manual BUY executed: {order['orderId']} - {usdt_to_spend:.2f} USDT (~{btc_quantity:.6f} BTC)")
+            
+            return {
+                "status": "success",
+                "action": "BUY",
+                "order_id": order['orderId'],
+                "usdt_spent": usdt_to_spend,
+                "btc_received": btc_quantity,
+                "price": current_price
+            }
+        
+        elif request.side.upper() == 'SELL':
+            # Calculate BTC amount to sell
+            if request.percentage:
+                btc_to_sell = btc_balance * request.percentage
+            elif request.amount_btc:
+                btc_to_sell = request.amount_btc
+            else:
+                raise HTTPException(status_code=400, detail="Must specify either amount_btc or percentage for SELL")
+            
+            # Validate order size
+            if btc_to_sell < 0.00001:
+                raise HTTPException(status_code=400, detail=f"Order too small: {btc_to_sell:.6f} BTC (minimum 0.00001 BTC)")
+            
+            if btc_to_sell > btc_balance:
+                raise HTTPException(status_code=400, detail=f"Insufficient BTC. Need {btc_to_sell:.6f}, have {btc_balance:.6f}")
+            
+            # Execute SELL order
+            order = binance_client.order_market_sell(
+                symbol='BTCUSDT',
+                quantity=f"{btc_to_sell:.6f}"
+            )
+            
+            usdt_received = btc_to_sell * current_price
+            logger.info(f"✅ Manual SELL executed: {order['orderId']} - {btc_to_sell:.6f} BTC (~{usdt_received:.2f} USDT)")
+            
+            return {
+                "status": "success",
+                "action": "SELL",
+                "order_id": order['orderId'],
+                "btc_sold": btc_to_sell,
+                "usdt_received": usdt_received,
+                "price": current_price
+            }
+        
+        else:
+            raise HTTPException(status_code=400, detail="Side must be 'BUY' or 'SELL'")
+    
+    except Exception as e:
+        logger.error(f"❌ Manual trade failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/convert-btc-to-usdt")
+async def convert_btc_to_usdt(request: ConvertRequest):
+    """Convert BTC to USDT (useful for getting trading funds)"""
+    if not binance_client:
+        raise HTTPException(status_code=400, detail="Binance API not configured")
+
+    try:
+        account = binance_client.get_account()
+        btc_balance = 0.0
+        for balance in account['balances']:
+            if balance['asset'] == 'BTC':
+                btc_balance = float(balance['free'])
+                break
+
+        if btc_balance <= 0:
+            raise HTTPException(status_code=400, detail="No BTC balance available")
+
+        btc_to_sell = max(btc_balance * max(min(request.percent, 1.0), 0.0), 0.00002)  # ensure above min
+        ticker = binance_client.get_ticker(symbol='BTCUSDT')
+        current_price = float(ticker['lastPrice'])
+        if btc_to_sell * current_price < 10:
+            raise HTTPException(status_code=400, detail="Order would be < 10 USDT minimum")
+
+        order = binance_client.order_market_sell(
+            symbol='BTCUSDT',
+            quantity=f"{btc_to_sell:.6f}"
+        )
+        return {
+            "status": "success", 
+            "sold_btc": btc_to_sell, 
+            "approx_usdt": btc_to_sell * current_price, 
+            "order_id": order['orderId']
+        }
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/trading-performance")
