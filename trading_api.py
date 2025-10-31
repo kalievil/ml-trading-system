@@ -662,8 +662,15 @@ def get_ml_signal():
         # Collect all probabilities first (same as algorithm)
         all_probabilities = []
         for name, model in ml_system.models.items():
-            prob = model.predict_proba(X_scaled)
-            all_probabilities.append(prob)
+            try:
+                logger.debug(f"🔄 Calling predict_proba on {name} with shape {X_scaled.shape}")
+                prob = model.predict_proba(X_scaled)
+                all_probabilities.append(prob)
+            except Exception as pred_error:
+                logger.error(f"❌ Error in predict_proba for {name}: {pred_error}")
+                import traceback
+                logger.error(f"❌ Traceback: {traceback.format_exc()}")
+                raise
         # Weight probabilities using ensemble weights (same logic as algorithm)
         ensemble_probabilities = np.zeros_like(all_probabilities[0], dtype=float)
         for i, (name, prob) in enumerate(zip(ml_system.models.keys(), all_probabilities)):
