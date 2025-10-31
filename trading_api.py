@@ -256,20 +256,43 @@ def initialize_ml_system():
                 'xgboost_aggressive': models_path / 'xgboost_aggressive.pkl',
                 'xgboost_balanced': models_path / 'xgboost_balanced.pkl',
             }
-            # Fix XGBoost version compatibility: monkey-patch to handle missing use_label_encoder
+            # Fix XGBoost version compatibility: monkey-patch to handle missing attributes
             try:
                 import xgboost as xgb
-                # Patch XGBClassifier to always return False for use_label_encoder if missing
-                original_getattribute = xgb.XGBClassifier.__getattribute__
-                def patched_getattribute(self, name):
-                    if name == 'use_label_encoder':
-                        try:
-                            return object.__getattribute__(self, name)
-                        except AttributeError:
-                            return False
-                    return original_getattribute(self, name)
-                xgb.XGBClassifier.__getattribute__ = patched_getattribute
-                logger.info("🔧 Applied XGBoost compatibility patch")
+                
+                # Compatibility attributes with default values
+                COMPAT_ATTRS = {
+                    'use_label_encoder': False,
+                    'gpu_id': None,
+                    'tree_method': 'hist'
+                }
+                
+                # Patch __getattribute__ to intercept attribute access
+                def make_compat_getattribute(cls):
+                    # Store original __getattribute__ before patching
+                    original = object.__getattribute__(cls, '__getattribute__')
+                    def compat_getattribute(self, name):
+                        # If it's a compatibility attribute, handle specially
+                        if name in COMPAT_ATTRS:
+                            try:
+                                # Try to get the real attribute first
+                                return original(self, name)
+                            except AttributeError:
+                                # Return default if attribute doesn't exist
+                                return COMPAT_ATTRS[name]
+                        # Otherwise use normal attribute access
+                        return original(self, name)
+                    return compat_getattribute
+                
+                # Patch all XGBoost model classes
+                model_classes = [xgb.XGBClassifier, xgb.XGBRegressor]
+                if hasattr(xgb, 'XGBModel'):
+                    model_classes.append(xgb.XGBModel)
+                    
+                for model_class in model_classes:
+                    model_class.__getattribute__ = make_compat_getattribute(model_class)
+                
+                logger.info("🔧 Applied XGBoost compatibility patch (use_label_encoder, gpu_id, tree_method)")
             except Exception as patch_error:
                 logger.warning(f"⚠️ Could not apply XGBoost patch: {patch_error}")
             
