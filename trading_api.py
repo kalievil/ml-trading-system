@@ -307,10 +307,12 @@ def initialize_ml_system():
                     import xgboost as xgb
                     
                     # Compatibility attributes with default values
+                    # These attributes may be missing in models trained with older XGBoost versions
                     COMPAT_ATTRS = {
                         'use_label_encoder': False,
                         'gpu_id': None,
-                        'tree_method': 'hist'
+                        'tree_method': 'hist',
+                        'predictor': None  # Added to fix AttributeError during predict_proba
                     }
                     
                     # Patch each loaded model instance by adding missing attributes
@@ -318,8 +320,9 @@ def initialize_ml_system():
                         for attr_name, default_value in COMPAT_ATTRS.items():
                             if not hasattr(model, attr_name):
                                 setattr(model, attr_name, default_value)
+                                logger.debug(f"  ✓ Added missing attribute '{attr_name}' to {name}")
                     
-                    logger.info("🔧 Applied XGBoost compatibility patch (use_label_encoder, gpu_id, tree_method)")
+                    logger.info(f"🔧 Applied XGBoost compatibility patch for {len(COMPAT_ATTRS)} attributes")
                 except Exception as patch_error:
                     logger.warning(f"⚠️ Could not apply XGBoost patch: {patch_error}")
                 
