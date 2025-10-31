@@ -301,7 +301,7 @@ def initialize_ml_system():
             if loaded_models:
                 ml_system.models = loaded_models
                 
-                # Fix XGBoost version compatibility: monkey-patch to handle missing attributes
+                # Fix XGBoost version compatibility: add missing attributes to model instances
                 # Apply patch AFTER loading models to avoid interfering with deserialization
                 try:
                     import xgboost as xgb
@@ -313,30 +313,11 @@ def initialize_ml_system():
                         'tree_method': 'hist'
                     }
                     
-                    # Patch __getattribute__ to intercept attribute access
-                    def make_compat_getattribute(cls):
-                        # Store original __getattribute__ before patching
-                        original = object.__getattribute__(cls, '__getattribute__')
-                        def compat_getattribute(self, name):
-                            # If it's a compatibility attribute, handle specially
-                            if name in COMPAT_ATTRS:
-                                try:
-                                    # Try to get the real attribute first
-                                    return original(self, name)
-                                except AttributeError:
-                                    # Return default if attribute doesn't exist
-                                    return COMPAT_ATTRS[name]
-                            # Otherwise use normal attribute access
-                            return original(self, name)
-                        return compat_getattribute
-                    
-                    # Patch all XGBoost model classes
-                    model_classes = [xgb.XGBClassifier, xgb.XGBRegressor]
-                    if hasattr(xgb, 'XGBModel'):
-                        model_classes.append(xgb.XGBModel)
-                        
-                    for model_class in model_classes:
-                        model_class.__getattribute__ = make_compat_getattribute(model_class)
+                    # Patch each loaded model instance by adding missing attributes
+                    for name, model in loaded_models.items():
+                        for attr_name, default_value in COMPAT_ATTRS.items():
+                            if not hasattr(model, attr_name):
+                                setattr(model, attr_name, default_value)
                     
                     logger.info("🔧 Applied XGBoost compatibility patch (use_label_encoder, gpu_id, tree_method)")
                 except Exception as patch_error:
