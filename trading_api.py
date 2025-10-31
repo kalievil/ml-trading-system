@@ -283,59 +283,65 @@ def initialize_ml_system():
             else:
                 logger.info(f"ℹ️ Ensemble weights file not found (will use equal weights): {ensemble_weights_path.absolute()}")
             
-            # Fix XGBoost version compatibility: monkey-patch to handle missing attributes
-            try:
-                import xgboost as xgb
-                
-                # Compatibility attributes with default values
-                COMPAT_ATTRS = {
-                    'use_label_encoder': False,
-                    'gpu_id': None,
-                    'tree_method': 'hist'
-                }
-                
-                # Patch __getattribute__ to intercept attribute access
-                def make_compat_getattribute(cls):
-                    # Store original __getattribute__ before patching
-                    original = object.__getattribute__(cls, '__getattribute__')
-                    def compat_getattribute(self, name):
-                        # If it's a compatibility attribute, handle specially
-                        if name in COMPAT_ATTRS:
-                            try:
-                                # Try to get the real attribute first
-                                return original(self, name)
-                            except AttributeError:
-                                # Return default if attribute doesn't exist
-                                return COMPAT_ATTRS[name]
-                        # Otherwise use normal attribute access
-                        return original(self, name)
-                    return compat_getattribute
-                
-                # Patch all XGBoost model classes
-                model_classes = [xgb.XGBClassifier, xgb.XGBRegressor]
-                if hasattr(xgb, 'XGBModel'):
-                    model_classes.append(xgb.XGBModel)
-                    
-                for model_class in model_classes:
-                    model_class.__getattribute__ = make_compat_getattribute(model_class)
-                
-                logger.info("🔧 Applied XGBoost compatibility patch (use_label_encoder, gpu_id, tree_method)")
-            except Exception as patch_error:
-                logger.warning(f"⚠️ Could not apply XGBoost patch: {patch_error}")
-            
+            # Load models FIRST, then apply compatibility patch
             loaded_models = {}
             for name, path in model_files.items():
                 if path.exists():
                     try:
+                        logger.info(f"🔄 Attempting to load model: {name} from {path.absolute()}")
                         model = joblib.load(path)
                         loaded_models[name] = model
-                        logger.info(f"🧪 Loaded model: {name}")
+                        logger.info(f"🧪 Loaded model: {name} successfully")
                     except Exception as load_error:
+                        import traceback
                         logger.error(f"❌ Failed to load model {name}: {load_error}")
+                        logger.error(f"❌ Traceback for {name}: {traceback.format_exc()}")
                         # Try to continue with other models
                         continue
             if loaded_models:
                 ml_system.models = loaded_models
+                
+                # Fix XGBoost version compatibility: monkey-patch to handle missing attributes
+                # Apply patch AFTER loading models to avoid interfering with deserialization
+                try:
+                    import xgboost as xgb
+                    
+                    # Compatibility attributes with default values
+                    COMPAT_ATTRS = {
+                        'use_label_encoder': False,
+                        'gpu_id': None,
+                        'tree_method': 'hist'
+                    }
+                    
+                    # Patch __getattribute__ to intercept attribute access
+                    def make_compat_getattribute(cls):
+                        # Store original __getattribute__ before patching
+                        original = object.__getattribute__(cls, '__getattribute__')
+                        def compat_getattribute(self, name):
+                            # If it's a compatibility attribute, handle specially
+                            if name in COMPAT_ATTRS:
+                                try:
+                                    # Try to get the real attribute first
+                                    return original(self, name)
+                                except AttributeError:
+                                    # Return default if attribute doesn't exist
+                                    return COMPAT_ATTRS[name]
+                            # Otherwise use normal attribute access
+                            return original(self, name)
+                        return compat_getattribute
+                    
+                    # Patch all XGBoost model classes
+                    model_classes = [xgb.XGBClassifier, xgb.XGBRegressor]
+                    if hasattr(xgb, 'XGBModel'):
+                        model_classes.append(xgb.XGBModel)
+                        
+                    for model_class in model_classes:
+                        model_class.__getattribute__ = make_compat_getattribute(model_class)
+                    
+                    logger.info("🔧 Applied XGBoost compatibility patch (use_label_encoder, gpu_id, tree_method)")
+                except Exception as patch_error:
+                    logger.warning(f"⚠️ Could not apply XGBoost patch: {patch_error}")
+                
                 # Load ensemble weights from file if available (same logic as algorithm)
                 ensemble_weights_path = models_path / "ensemble_weights.json"
                 if ensemble_weights_path.exists():
