@@ -256,11 +256,34 @@ def initialize_ml_system():
                 'xgboost_aggressive': models_path / 'xgboost_aggressive.pkl',
                 'xgboost_balanced': models_path / 'xgboost_balanced.pkl',
             }
+            # Fix XGBoost version compatibility: monkey-patch to handle missing use_label_encoder
+            try:
+                import xgboost as xgb
+                # Patch XGBClassifier to always return False for use_label_encoder if missing
+                original_getattribute = xgb.XGBClassifier.__getattribute__
+                def patched_getattribute(self, name):
+                    if name == 'use_label_encoder':
+                        try:
+                            return object.__getattribute__(self, name)
+                        except AttributeError:
+                            return False
+                    return original_getattribute(self, name)
+                xgb.XGBClassifier.__getattribute__ = patched_getattribute
+                logger.info("🔧 Applied XGBoost compatibility patch")
+            except Exception as patch_error:
+                logger.warning(f"⚠️ Could not apply XGBoost patch: {patch_error}")
+            
             loaded_models = {}
             for name, path in model_files.items():
                 if path.exists():
-                    loaded_models[name] = joblib.load(path)
-                    logger.info(f"🧪 Loaded model: {name}")
+                    try:
+                        model = joblib.load(path)
+                        loaded_models[name] = model
+                        logger.info(f"🧪 Loaded model: {name}")
+                    except Exception as load_error:
+                        logger.error(f"❌ Failed to load model {name}: {load_error}")
+                        # Try to continue with other models
+                        continue
             if loaded_models:
                 ml_system.models = loaded_models
                 # If ensemble weights not available, use equal weights
