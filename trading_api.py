@@ -246,16 +246,43 @@ def initialize_ml_system():
         # Try to load saved scaler and models for live predictions
         try:
             models_path = Path("user_data/models")
+            logger.info(f"📂 Looking for models in: {models_path.absolute()}")
+            
+            # Check if models directory exists
+            if not models_path.exists():
+                logger.warning(f"⚠️ Models directory does not exist: {models_path.absolute()}")
+                logger.warning("⚠️ You need to train models first or copy model files to this directory")
+            else:
+                logger.info(f"✅ Models directory exists: {models_path.absolute()}")
+            
             scaler_path = models_path / "scaler.pkl"
             if scaler_path.exists():
                 ml_system.scaler = joblib.load(scaler_path)
                 logger.info("🧪 Loaded scaler for live predictions")
+            else:
+                logger.warning(f"⚠️ Scaler not found: {scaler_path.absolute()}")
+            
             # Load ensemble models if present
             model_files = {
                 'xgboost_performance': models_path / 'xgboost_performance.pkl',
                 'xgboost_aggressive': models_path / 'xgboost_aggressive.pkl',
                 'xgboost_balanced': models_path / 'xgboost_balanced.pkl',
             }
+            
+            # Log which model files exist
+            for name, path in model_files.items():
+                if path.exists():
+                    logger.info(f"✅ Found model file: {name} at {path.absolute()}")
+                else:
+                    logger.warning(f"⚠️ Model file not found: {name} at {path.absolute()}")
+            
+            # Check for ensemble weights file (saved by algorithm)
+            ensemble_weights_path = models_path / "ensemble_weights.json"
+            if ensemble_weights_path.exists():
+                logger.info(f"✅ Found ensemble weights file: {ensemble_weights_path.absolute()}")
+            else:
+                logger.info(f"ℹ️ Ensemble weights file not found (will use equal weights): {ensemble_weights_path.absolute()}")
+            
             # Fix XGBoost version compatibility: monkey-patch to handle missing attributes
             try:
                 import xgboost as xgb
@@ -309,12 +336,43 @@ def initialize_ml_system():
                         continue
             if loaded_models:
                 ml_system.models = loaded_models
-                # If ensemble weights not available, use equal weights
-                weight = 1.0 / len(loaded_models)
-                ml_system.ensemble_weights = {k: weight for k in loaded_models.keys()}
-                logger.info(f"🧪 Ensemble ready with weights: {ml_system.ensemble_weights}")
+                # Load ensemble weights from file if available (same logic as algorithm)
+                ensemble_weights_path = models_path / "ensemble_weights.json"
+                if ensemble_weights_path.exists():
+                    try:
+                        with open(ensemble_weights_path, 'r') as f:
+                            saved_weights = json.load(f)
+                        # Filter to only weights for models we loaded
+                        ml_system.ensemble_weights = {k: saved_weights.get(k, 0) for k in loaded_models.keys()}
+                        # Normalize weights to sum to 1 (same as algorithm logic)
+                        total_weight = sum(ml_system.ensemble_weights.values())
+                        if total_weight > 0:
+                            ml_system.ensemble_weights = {k: v/total_weight for k, v in ml_system.ensemble_weights.items()}
+                        else:
+                            # Fallback to equal weights if normalization fails
+                            weight = 1.0 / len(loaded_models)
+                            ml_system.ensemble_weights = {k: weight for k in loaded_models.keys()}
+                        logger.info(f"🧪 Loaded ensemble weights from file: {ml_system.ensemble_weights}")
+                    except Exception as weight_error:
+                        logger.warning(f"⚠️ Could not load ensemble weights: {weight_error}")
+                        # Fallback to equal weights (same as algorithm default)
+                        weight = 1.0 / len(loaded_models)
+                        ml_system.ensemble_weights = {k: weight for k in loaded_models.keys()}
+                        logger.info(f"🧪 Using equal ensemble weights: {ml_system.ensemble_weights}")
+                else:
+                    # If weights file doesn't exist, use equal weights (same as algorithm default)
+                    weight = 1.0 / len(loaded_models)
+                    ml_system.ensemble_weights = {k: weight for k in loaded_models.keys()}
+                    logger.info(f"🧪 Ensemble weights file not found, using equal weights: {ml_system.ensemble_weights}")
+                
+                logger.info(f"🧪 Ensemble ready with {len(loaded_models)} models and weights: {ml_system.ensemble_weights}")
+            else:
+                logger.error("❌ No models were loaded! Check that model .pkl files exist in user_data/models/")
+                logger.error("   Required files: xgboost_performance.pkl, xgboost_aggressive.pkl, xgboost_balanced.pkl")
         except Exception as model_e:
-            logger.warning(f"⚠️ Could not load saved models/scaler: {model_e}")
+            logger.error(f"❌ Could not load saved models/scaler: {model_e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
         return True
     except Exception as e:
         logger.error(f"❌ Failed to initialize ML system: {e}")
@@ -611,17 +669,22 @@ def get_ml_signal():
         if not hasattr(ml_system, 'scaler') or ml_system.scaler is None:
             raise RuntimeError("Scaler not loaded. Train and save models first or provide scaler.pkl")
         X_scaled = ml_system.scaler.transform(X_row)
-        # Predict via ensemble
+        # Predict via ensemble (same logic as algorithm's _ensemble_predict)
         if not hasattr(ml_system, 'models') or not ml_system.models:
             raise RuntimeError("Models not loaded. Train and save models first or provide model pkl files")
-        probs_accum = None
+        # Collect all probabilities first (same as algorithm)
+        all_probabilities = []
         for name, model in ml_system.models.items():
             prob = model.predict_proba(X_scaled)
+            all_probabilities.append(prob)
+        # Weight probabilities using ensemble weights (same logic as algorithm)
+        ensemble_probabilities = np.zeros_like(all_probabilities[0], dtype=float)
+        for i, (name, prob) in enumerate(zip(ml_system.models.keys(), all_probabilities)):
             weight = ml_system.ensemble_weights.get(name, 1.0/len(ml_system.models))
-            probs_accum = prob * weight if probs_accum is None else probs_accum + prob * weight
-        # Determine class: 0=HOLD, 1=BUY, 2=SELL
-        cls_idx = int(np.argmax(probs_accum, axis=1)[0])
-        confidence = float(np.max(probs_accum, axis=1)[0])
+            ensemble_probabilities += weight * prob
+        # Determine class: 0=HOLD, 1=BUY, 2=SELL (same as algorithm)
+        cls_idx = int(np.argmax(ensemble_probabilities, axis=1)[0])
+        confidence = float(np.max(ensemble_probabilities, axis=1)[0])
         signal_map = {0:'HOLD', 1:'BUY', 2:'SELL'}
         signal = signal_map.get(cls_idx, 'HOLD')
         # Volatility from features

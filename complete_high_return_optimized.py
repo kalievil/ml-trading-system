@@ -455,6 +455,12 @@ class OptimizedHighReturnSystem:
                 with open(models_path / "feature_columns.json", 'w') as f:
                     json.dump(feature_columns, f)
                 logger.info("✅ Feature columns saved")
+            
+            # Save ensemble weights (same logic as used in predictions)
+            if hasattr(self, 'ensemble_weights') and self.ensemble_weights:
+                with open(models_path / "ensemble_weights.json", 'w') as f:
+                    json.dump(self.ensemble_weights, f, indent=2)
+                logger.info("✅ Ensemble weights saved")
                 
         except Exception as e:
             logger.error(f"Error saving models: {e}")
