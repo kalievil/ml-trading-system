@@ -23,8 +23,25 @@ from pydantic import BaseModel, Field
 import uvicorn
 import joblib
 
-# Import your ML algorithm
-from complete_high_return_optimized import OptimizedHighReturnSystem
+# Import your ML algorithm - NOW USING TARGETED LONG LOSS FIX SYSTEM
+from importlib import import_module
+import sys
+from pathlib import Path
+
+# Import the TargetedLongLossFixSystem from 97%WR-AND-2940%.py
+# We need to handle the special filename (starts with a number)
+import importlib.util
+algorithm_file_path = Path("97%WR-AND-2940%.py")
+
+if algorithm_file_path.exists():
+    spec = importlib.util.spec_from_file_location("ml_algorithm", algorithm_file_path)
+    ml_algorithm_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ml_algorithm_module)
+    TargetedLongLossFixSystem = ml_algorithm_module.TargetedLongLossFixSystem
+else:
+    # Fallback to old system if file doesn't exist
+    from complete_high_return_optimized import OptimizedHighReturnSystem
+    TargetedLongLossFixSystem = OptimizedHighReturnSystem
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -241,8 +258,8 @@ def initialize_ml_system():
     """Initialize ML system"""
     global ml_system
     try:
-        ml_system = OptimizedHighReturnSystem(max_leverage=5)
-        logger.info("✅ ML system initialized successfully")
+        ml_system = TargetedLongLossFixSystem()
+        logger.info("✅ ML system initialized successfully (Targeted Long Loss Fix System)")
         # Try to load saved scaler and models for live predictions
         try:
             models_path = Path("user_data/models")
@@ -261,6 +278,29 @@ def initialize_ml_system():
                 logger.info("🧪 Loaded scaler for live predictions")
             else:
                 logger.warning(f"⚠️ Scaler not found: {scaler_path.absolute()}")
+            
+            # Load selected features if present (CRITICAL for feature matching)
+            selected_features_path = models_path / "selected_features.json"
+            if selected_features_path.exists():
+                try:
+                    with open(selected_features_path, 'r') as f:
+                        loaded_features = json.load(f)
+                        # Ensure it's a list (not a dict or other structure)
+                        if isinstance(loaded_features, list):
+                            ml_system.selected_features = loaded_features
+                        else:
+                            logger.warning(f"⚠️ selected_features.json is not a list, ignoring")
+                            ml_system.selected_features = None
+                    if ml_system.selected_features:
+                        logger.info(f"✅ Loaded {len(ml_system.selected_features)} selected features from file")
+                        logger.info(f"   First 5 features: {ml_system.selected_features[:5]}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not load selected features: {e}")
+                    ml_system.selected_features = None
+            else:
+                logger.warning(f"⚠️ selected_features.json not found at {selected_features_path.absolute()}")
+                logger.warning("⚠️ API will use all features (may cause errors if models were trained with subset)")
+                ml_system.selected_features = None
             
             # Load ensemble models if present
             model_files = {
@@ -509,6 +549,18 @@ def automatic_trading_loop():
             
             # Check if signal meets criteria for automatic execution
             if signal_data['confidence'] >= 0.63 and signal_data['signal'] != 'HOLD':
+                # CRITICAL FIX #1: Check if we already have open positions (prevent multiple simultaneous trades)
+                if signal_data['signal'] == 'BUY' and open_positions:
+                    logger.debug(f"⏸️ BUY signal ignored: {len(open_positions)} open positions already exist")
+                    time.sleep(10)
+                    continue
+                
+                # CRITICAL FIX #2: DISABLE SELL signals (same as backtest - SHORT trades have 1-3% win rate)
+                if signal_data['signal'] == 'SELL':
+                    logger.debug(f"⏸️ SELL signal ignored: SHORT trades disabled (1-3% win rate)")
+                    time.sleep(10)
+                    continue
+                
                 logger.info(f"🎯 Auto-trading: {signal_data['signal']} signal with {signal_data['confidence']:.1%} confidence")
                 
                 try:
@@ -529,8 +581,14 @@ def automatic_trading_loop():
                     
                     # Execute trade based on signal
                     if signal_data['signal'] == 'BUY':
-                        # FIXED: Only use available USDT, not total portfolio value
+                        # Use AVAILABLE capital for position sizing (allows compounding growth)
+                        # position_size from ML (35-70%) applied to current available balance
                         usdt_to_spend = usdt_balance * signal_data['position_size']
+                        
+                        # Ensure we don't spend more than available (leave 1% for fees)
+                        usdt_to_spend = min(usdt_to_spend, usdt_balance * 0.99)
+                        
+                        logger.info(f"💰 Position sizing: usdt_available={usdt_balance:.2f}, position_size={signal_data['position_size']:.2%}, final_amount={usdt_to_spend:.2f}")
                         
                         # Check minimum order size (Binance minimum is typically 10 USDT)
                         if usdt_to_spend < 10:
@@ -550,8 +608,11 @@ def automatic_trading_loop():
                         
                         # Track the position for stop-loss/take-profit management
                         position_id = f"pos_{int(time.time())}"
-                        stop_loss_price = current_price * (1 - signal_data.get('stop_loss_pct', 0.018))  # 1.8% stop-loss
-                        take_profit_price = current_price * (1 + signal_data.get('take_profit_pct', 0.015))  # 1.5% take-profit
+                        # Use long_stop_loss_pct from TargetedLongLossFixSystem (0.6%)
+                        stop_loss_pct = getattr(ml_system, 'long_stop_loss_pct', 0.006)
+                        stop_loss_price = current_price * (1 - stop_loss_pct)
+                        # Use dynamic take-profit from signal (already calculated)
+                        take_profit_price = signal_data.get('take_profit', current_price * 1.015)  # Dynamic TP from signal
                         
                         open_positions[position_id] = {
                             'side': 'BUY',
@@ -563,28 +624,6 @@ def automatic_trading_loop():
                         }
                         
                         logger.info(f"📊 Position tracked: {position_id} - Entry: {current_price:.2f}, SL: {stop_loss_price:.2f}, TP: {take_profit_price:.2f}")
-                    
-                    elif signal_data['signal'] == 'SELL':
-                        # For SELL, position_size is percentage of BTC holdings
-                        btc_to_sell = btc_balance * signal_data['position_size']
-                        
-                        # Ensure we have BTC to sell
-                        if btc_to_sell > btc_balance:
-                            logger.warning(f"⚠️ Insufficient BTC. Need {btc_to_sell:.6f} BTC, have {btc_balance:.6f} BTC")
-                            btc_to_sell = btc_balance * 0.99  # Use 99% to leave some
-                        
-                        # Check minimum order size
-                        if btc_to_sell < 0.00001:
-                            logger.warning(f"⚠️ Order size too small: {btc_to_sell:.6f} BTC (minimum 0.00001 BTC)")
-                            time.sleep(10)
-                            continue
-                        
-                        # Execute SELL order
-                        order = binance_client.order_market_sell(
-                            symbol='BTCUSDT',
-                            quantity=f"{btc_to_sell:.6f}"
-                        )
-                        logger.info(f"✅ Auto-executed SELL order: {order['orderId']} - {btc_to_sell:.6f} BTC (~{btc_to_sell * current_price:.2f} USDT)")
                     
                 except Exception as trade_error:
                     logger.error(f"❌ Auto-trade execution failed: {trade_error}")
@@ -626,9 +665,11 @@ def get_ml_signal():
             }
         
         # Fetch live klines to build features matching the strategy
-        klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=max(ml_system.lookback_period + 50, 300))
-        if not klines:
-            raise RuntimeError("No klines returned from Binance")
+        # Need at least lookback_period + some buffer for feature calculation
+        required_klines = max(ml_system.lookback_period + 100, 300)
+        klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=required_klines)
+        if not klines or len(klines) < ml_system.lookback_period:
+            raise RuntimeError(f"Not enough klines: got {len(klines) if klines else 0}, need at least {ml_system.lookback_period}")
         # Build dataframe
         df = pd.DataFrame(klines, columns=[
             'open_time','open','high','low','close','volume','close_time','qav','num_trades','taker_base','taker_quote','ignore'
@@ -648,16 +689,47 @@ def get_ml_signal():
         drop_cols = [c for c in ['kline_timestamp', 'open_time'] if c in df_renamed.columns]
         if drop_cols:
             df_renamed = df_renamed.drop(columns=drop_cols)
-        df_features = ml_system.create_features(df_renamed)
+        # Use TargetedLongLossFixSystem's create_targeted_features method
+        df_features = ml_system.create_targeted_features(df_renamed)
         if df_features is None or len(df_features) == 0:
             raise RuntimeError("Feature creation returned empty dataframe")
-        # Extract latest feature row
-        feature_columns = [c for c in df_features.columns if c not in ['timestamp','target','open','high','low','close','volume']]
+        
+        # Get the latest row
         latest_row = df_features.iloc[-1]
-        X_row = latest_row[feature_columns].values.reshape(1, -1)
-        # Scale
+        
+        # CRITICAL: Use selected_features in the EXACT order they were trained
+        # This ensures compatibility with the scaler and models
+        if hasattr(ml_system, 'selected_features') and ml_system.selected_features:
+            # Use features in the exact order they were saved during training
+            # This matches the order used during model training
+            feature_list = ml_system.selected_features
+            logger.debug(f"Using {len(feature_list)} features from selected_features.json")
+            
+            # Verify all features exist in the dataframe
+            missing_features = [f for f in feature_list if f not in df_features.columns]
+            if missing_features:
+                logger.error(f"❌ Missing features: {missing_features[:10]}...")
+                raise RuntimeError(f"Missing {len(missing_features)} required features in dataframe")
+            
+            # Extract features in the exact training order
+            X_row = latest_row[feature_list].values.reshape(1, -1)
+        else:
+            # Fallback: use all features except metadata columns
+            feature_columns = [c for c in df_features.columns if c not in ['timestamp','target','open','high','low','close','volume']]
+            logger.warning(f"⚠️ No selected_features found, using all {len(feature_columns)} features")
+            X_row = latest_row[feature_columns].values.reshape(1, -1)
+        
+        # Scale features - scaler expects exact same features in same order as training
         if not hasattr(ml_system, 'scaler') or ml_system.scaler is None:
             raise RuntimeError("Scaler not loaded. Train and save models first or provide scaler.pkl")
+        
+        # Verify feature count matches scaler expectation
+        scaler_n_features = ml_system.scaler.n_features_in_ if hasattr(ml_system.scaler, 'n_features_in_') else None
+        if scaler_n_features and X_row.shape[1] != scaler_n_features:
+            error_msg = f"Feature count mismatch: Expected {scaler_n_features} features (from scaler), got {X_row.shape[1]}"
+            logger.error(f"❌ {error_msg}")
+            raise RuntimeError(error_msg)
+        
         X_scaled = ml_system.scaler.transform(X_row)
         # Predict via ensemble (same logic as algorithm's _ensemble_predict)
         if not hasattr(ml_system, 'models') or not ml_system.models:
@@ -688,11 +760,14 @@ def get_ml_signal():
         volatility = float(latest_row.get('volatility', 0.02))
         # Current price
         current_price = float(df['close'].iloc[-1])
-        # Calculate position size and risk parameters from algorithm
-        position_size = float(ml_system.calculate_position_size(confidence, volatility))
-        leverage = float(ml_system.calculate_dynamic_leverage(confidence, volatility))
-        stop_loss = current_price * (1 - ml_system.stop_loss_pct)
-        take_profit = current_price * (1 + ml_system.take_profit_pct)
+        # Calculate position size using TargetedLongLossFixSystem method
+        position_size = float(ml_system._calculate_position_size(confidence))
+        # No leverage in TargetedLongLossFixSystem, use 1.0
+        leverage = 1.0
+        stop_loss = current_price * (1 - ml_system.long_stop_loss_pct)
+        # Use dynamic take-profit based on confidence
+        dynamic_tp = ml_system._calculate_dynamic_take_profit(confidence, 'LONG')
+        take_profit = current_price * (1 + dynamic_tp)
         
         return {
             'signal': signal,
@@ -703,9 +778,9 @@ def get_ml_signal():
             'stop_loss': stop_loss,
             'take_profit': take_profit,
             'current_price': current_price,
-            'algorithm': 'Optimized High-Return System',
+            'algorithm': 'Targeted Long Loss Fix System (0.6% SL)',
             'models_loaded': True,
-            'trading_halted': ml_system.trading_halted
+            'trading_halted': getattr(ml_system, 'trading_halted', False)
         }
         
     except Exception as e:
