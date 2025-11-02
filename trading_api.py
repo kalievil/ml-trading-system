@@ -548,7 +548,8 @@ def automatic_trading_loop():
             signal_data = get_ml_signal()
             
             # Check if signal meets criteria for automatic execution
-            if signal_data['confidence'] >= 0.63 and signal_data['signal'] != 'HOLD':
+            # Use same threshold as backtest for consistency (42% = 68% win rate)
+            if signal_data['confidence'] >= 0.42 and signal_data['signal'] != 'HOLD':
                 # CRITICAL FIX #1: Check if we already have open positions (prevent multiple simultaneous trades)
                 if signal_data['signal'] == 'BUY' and open_positions:
                     logger.debug(f"⏸️ BUY signal ignored: {len(open_positions)} open positions already exist")
