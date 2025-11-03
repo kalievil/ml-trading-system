@@ -1,6 +1,34 @@
 import { useState, useEffect } from "react";
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// Auto-detect API URL based on current hostname
+// If running on same server, use port 8000 for API, otherwise use env var or localhost
+function getApiBaseUrl(): string {
+  // First check environment variable
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  
+  // Auto-detect: if frontend is on a specific hostname, API should be on same hostname port 8000
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    const protocol = window.location.protocol;
+    
+    // If not localhost, use the same hostname with port 8000
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      return `${protocol}//${hostname}:8000`;
+    }
+  }
+  
+  // Fallback to localhost for local development
+  return "http://localhost:8000";
+}
+
+const API_BASE_URL = getApiBaseUrl();
+
+// Log the API URL for debugging (only once at module load)
+if (typeof window !== 'undefined') {
+  console.log(`🌐 API Base URL detected: ${API_BASE_URL} (from hostname: ${window.location.hostname})`);
+}
 
 export interface TradingSignal {
   symbol: string;
