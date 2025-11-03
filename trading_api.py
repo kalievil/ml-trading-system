@@ -834,7 +834,8 @@ def automatic_trading_loop():
                 time.sleep(2)  # Still check TP/SL every 2 seconds even if step check fails
                 continue  # Skip this evaluation cycle if step check fails
             
-            # Get ML signal
+
+                    # Get ML signal
             signal_data = get_ml_signal()
             
             # Check if signal meets criteria for automatic execution
@@ -1181,6 +1182,69 @@ def get_ml_signal():
         dynamic_tp = ml_system._calculate_dynamic_take_profit(confidence, 'LONG')
         take_profit = current_price * (1 + dynamic_tp)
         
+        # Calculate Step Size Evaluation info
+        # This shows which bar is being evaluated (always "1 / 6" when evaluating, or "waiting X / 6" when not)
+        global last_evaluated_bar_time, step_size
+        step_size_evaluation = None
+        try:
+            # Get recent bars to determine step size position
+            step_klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=step_size * 2)
+            if step_klines and len(step_klines) >= step_size:
+                latest_bar_index = len(step_klines) - 2 if len(step_klines) >= 2 else len(step_klines) - 1
+                latest_bar_time = int(step_klines[latest_bar_index]['close_time'])
+                
+                if last_evaluated_bar_time is None:
+                    # First evaluation - evaluating bar 1
+                    step_size_evaluation = f"1 / {step_size}"
+                else:
+                    # Find how many bars have passed since last evaluation
+                    bars_since_last = 0
+                    found_last = False
+                    for i in range(latest_bar_index, -1, -1):
+                        if int(step_klines[i]['close_time']) == last_evaluated_bar_time:
+                            bars_since_last = latest_bar_index - i
+                            found_last = True
+                            break
+                    
+                    if not found_last:
+                        time_diff_ms = latest_bar_time - last_evaluated_bar_time
+                        estimated_bars = time_diff_ms // 300000
+                        if estimated_bars >= step_size:
+                            bars_since_last = step_size
+                    
+                    # When get_ml_signal() is called, we ARE evaluating, so it's always "1 / 6"
+                    # The bars_since_last tells us if we should evaluate (>= step_size) or wait
+                    if bars_since_last >= step_size:
+                        # We're evaluating now (bar 1 of the cycle)
+                        step_size_evaluation = f"1 / {step_size} (evaluating)"
+                    else:
+                        # We're waiting, show how many bars we're waiting for
+                        remaining = step_size - bars_since_last
+                        step_size_evaluation = f"Waiting {remaining} / {step_size} (last: {bars_since_last})"
+        except Exception as e:
+            logger.debug(f"Could not calculate step size evaluation: {e}")
+            step_size_evaluation = f"? / {step_size}"
+        
+        # Check Should Allow Signal filter (for BUY signals only)
+        should_allow_signal = None
+        should_allow_reason = None
+        if signal == 'BUY':
+            try:
+                # Use the same dataframe we already built
+                current_idx = len(df_renamed) - 1
+                prediction = 1  # BUY signal
+                allowed, reason = ml_system._should_allow_long_signal(df_renamed, current_idx, confidence, prediction)
+                should_allow_signal = allowed
+                should_allow_reason = reason
+            except Exception as filter_error:
+                logger.debug(f"Could not check should_allow_long_signal filter: {filter_error}")
+                should_allow_signal = None
+                should_allow_reason = f"Error: {str(filter_error)}"
+        else:
+            # For SELL or HOLD, filter doesn't apply
+            should_allow_signal = None
+            should_allow_reason = "N/A (not a BUY signal)"
+        
         return {
             'signal': signal,
             'confidence': confidence,
@@ -1192,7 +1256,10 @@ def get_ml_signal():
             'current_price': current_price,
             'algorithm': 'Targeted Long Loss Fix System (0.6% SL)',
             'models_loaded': True,
-            'trading_halted': getattr(ml_system, 'trading_halted', False)
+            'trading_halted': getattr(ml_system, 'trading_halted', False),
+            'step_size_evaluation': step_size_evaluation,  # e.g., "1 / 6" or "3 / 6"
+            'should_allow_signal': should_allow_signal,  # True/False/None
+            'should_allow_reason': should_allow_reason  # Reason string
         }
         
     except Exception as e:
@@ -1204,7 +1271,10 @@ def get_ml_signal():
             'leverage': 1.0,
             'position_size': 0.0,
             'stop_loss': 0.0,
-            'take_profit': 0.0
+            'take_profit': 0.0,
+            'step_size_evaluation': None,
+            'should_allow_signal': None,
+            'should_allow_reason': f'Error: {str(e)}'
         }
 
 # API Endpoints
@@ -1948,14 +2018,23 @@ async def get_trading_performance():
                 actual_btc = min(btc_balance, total_btc_qty)
                 unrealized_pnl = (current_price - avg_buy_price) * actual_btc
         
-        # Calculate win/loss statistics
+        # Calculate win/loss statistics - ONLY count trades closed by TP/SL (not BTC->USDT conversions)
+        global completed_trades_history
+        
+        # Filter to only trades that were closed by TP/SL (have exit_reason)
+        tp_sl_trades = [
+            ct for ct in completed_trades_history 
+            if ct.get('exit_reason') in ['stop_loss', 'take_profit']
+        ]
+        
         profitable_trades = 0
         losing_trades = 0
         winning_pnls = []
         losing_pnls = []
         
-        for trade in completed_trades:
-            pnl = trade['pnl']
+        # Calculate Win Rate based ONLY on TP/SL trades
+        for trade in tp_sl_trades:
+            pnl = trade.get('realized_pnl', 0)
             if pnl > 0:
                 profitable_trades += 1
                 winning_pnls.append(pnl)
@@ -1963,36 +2042,41 @@ async def get_trading_performance():
                 losing_trades += 1
                 losing_pnls.append(pnl)
         
-        # Calculate averages
+        # Calculate averages (only for TP/SL trades)
         average_win = sum(winning_pnls) / len(winning_pnls) if winning_pnls else 0.0
         average_loss = sum(losing_pnls) / len(losing_pnls) if losing_pnls else 0.0
         
-        # Total P&L (realized + unrealized, minus commissions)
+        # Total P&L (realized + unrealized, minus commissions) - still use all trades for P&L
         total_pnl = total_realized_pnl + unrealized_pnl - total_commission_paid
         
         # Calculate return percentage (approximate, would need initial balance for exact calculation)
         total_wallet_balance = usdt_balance + (btc_balance * current_price)
         
+        # Win Rate based ONLY on TP/SL trades (not conversions)
+        tp_sl_trade_count = len(tp_sl_trades)
+        win_rate = (profitable_trades / tp_sl_trade_count * 100) if tp_sl_trade_count > 0 else 0.0
+        
+        # Keep completed_trade_count for backward compatibility (all BUY/SELL pairs)
         completed_trade_count = len(completed_trades)
-        win_rate = (profitable_trades / completed_trade_count * 100) if completed_trade_count > 0 else 0.0
         
         return {
             "total_pnl": round(total_pnl, 2),
             "realized_pnl": round(total_realized_pnl, 2),
             "unrealized_pnl": round(unrealized_pnl, 2),
             "total_commission_paid": round(total_commission_paid, 6),
-            "win_rate_percent": round(win_rate, 2),
+            "win_rate_percent": round(win_rate, 2),  # Based ONLY on TP/SL trades
             "total_trades": len(trades),
-            "completed_trades": completed_trade_count,
-            "profitable_trades": profitable_trades,
-            "losing_trades": losing_trades,
+            "completed_trades": tp_sl_trade_count,  # Only TP/SL trades (not conversions)
+            "profitable_trades": profitable_trades,  # Only TP/SL trades
+            "losing_trades": losing_trades,  # Only TP/SL trades
             "average_win": round(average_win, 2),
             "average_loss": round(average_loss, 2),
             "current_btc_balance": round(btc_balance, 8),
             "current_usdt_balance": round(usdt_balance, 2),
             "total_wallet_balance": round(total_wallet_balance, 2),
             "current_btc_price": round(current_price, 2),
-            "daily_return_percent": round((daily_realized_pnl / max(total_wallet_balance, 1)) * 100, 2) if total_wallet_balance > 0 else 0.0
+            "daily_return_percent": round((daily_realized_pnl / max(total_wallet_balance, 1)) * 100, 2) if total_wallet_balance > 0 else 0.0,
+            "tp_sl_trades_only": True  # Flag to indicate Win Rate is based on TP/SL only
         }
         
     except Exception as e:

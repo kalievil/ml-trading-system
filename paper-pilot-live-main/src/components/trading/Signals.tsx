@@ -161,12 +161,36 @@ const Signals = () => {
               <p className="font-semibold">{signal?.models_loaded ? 'Yes' : 'No'}</p>
             </div>
             <div className="space-y-1">
+              <p className="text-muted-foreground">Step Size Evaluation</p>
+              <p className="font-semibold mono-nums">
+                {signal?.step_size_evaluation || '—'}
+              </p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-muted-foreground">Should Allow Signal</p>
+              {signal?.should_allow_signal !== null && signal?.should_allow_signal !== undefined ? (
+                <Badge variant={signal.should_allow_signal ? 'default' : 'destructive'}>
+                  {signal.should_allow_signal ? '✅ Yes' : '❌ No'}
+                </Badge>
+              ) : (
+                <p className="font-semibold text-muted-foreground">
+                  {signal?.should_allow_reason || '—'}
+                </p>
+              )}
+            </div>
+            <div className="space-y-1 col-span-2">
+              <p className="text-muted-foreground">Allow Signal Reason</p>
+              <p className="font-semibold text-xs leading-snug">
+                {signal?.should_allow_reason || '—'}
+              </p>
+            </div>
+            <div className="space-y-1">
               <p className="text-muted-foreground">Trading Halted</p>
               <Badge variant={halted ? 'destructive' : 'secondary'}>{halted ? 'Yes' : 'No'}</Badge>
             </div>
             <div className="space-y-1">
               <p className="text-muted-foreground">Timestamp</p>
-              <p className="font-semibold mono-nums">{signal?.timestamp || '—'}</p>
+              <p className="font-semibold mono-nums text-xs">{signal?.timestamp || '—'}</p>
             </div>
           </div>
         </Card>

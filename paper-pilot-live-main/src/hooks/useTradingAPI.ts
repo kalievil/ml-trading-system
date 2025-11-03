@@ -19,6 +19,9 @@ export interface TradingSignal {
   algorithm?: string;  // ML algorithm name
   models_loaded?: boolean;  // ML models status
   trading_halted?: boolean;  // ML trading status
+  step_size_evaluation?: string | null;  // e.g., "1 / 6" or "3 / 6"
+  should_allow_signal?: boolean | null;  // True/False/None
+  should_allow_reason?: string | null;  // Reason for should_allow_signal
   indicators?: {
     rsi_14: number;
     macd: number;
