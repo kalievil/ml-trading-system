@@ -420,16 +420,33 @@ export const useTradingAPI = () => {
   // Health check
   const healthCheck = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/health`);
+      console.log(`🔍 Checking API health at: ${API_BASE_URL}/api/health`);
+      // Create AbortController for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      
+      const response = await fetch(`${API_BASE_URL}/api/health`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
       
       if (!response.ok) {
-        throw new Error('API server not responding');
+        console.error(`❌ Health check failed: HTTP ${response.status} ${response.statusText}`);
+        throw new Error(`API server not responding: HTTP ${response.status}`);
       }
 
       const health = await response.json();
+      console.log('✅ Health check successful:', health);
       return health;
     } catch (err: any) {
-      setError(err.message);
+      console.error('❌ Health check error:', err.message || err);
+      // Don't set error state for health check failures (they're expected if server is down)
+      // setError(err.message);
       return null;
     }
   };
@@ -522,30 +539,37 @@ export const useTradingAPI = () => {
         const health = await healthCheck();
         if (health) {
           // Check if API is healthy and has credentials (either configured or from file)
+          // FIXED: Connection should work if Binance is configured, even if ML system is not ready
           const hasCredentials = health.binance_configured || health.credentials_from_file;
-          const shouldBeConnected = health.ml_system_ready && hasCredentials;
+          // Only require Binance to be configured (ML can be loaded later)
+          const shouldBeConnected = hasCredentials;
           
-          // Debug logging
-          if (process.env.NODE_ENV === 'development') {
-            console.log('Health check:', {
-              ml_system_ready: health.ml_system_ready,
+          // Update connection status FIRST (to get current value)
+          setIsConnected(prev => {
+            // Debug logging (always log, not just in development)
+            console.log('🔍 Health check result:', {
+              status: health.status,
               binance_configured: health.binance_configured,
               credentials_from_file: health.credentials_from_file,
+              ml_system_ready: health.ml_system_ready,
               hasCredentials,
-              shouldBeConnected
+              shouldBeConnected,
+              previousIsConnected: prev
             });
-          }
-          
-          // Update connection status
-          setIsConnected(shouldBeConnected);
+            
+            if (!shouldBeConnected && hasCredentials) {
+              console.warn('⚠️ Binance is configured but ML system not ready - connection still allowed');
+            }
+            
+            return shouldBeConnected;
+          });
         } else {
+          console.warn('⚠️ Health check returned null/undefined');
           setIsConnected(false);
         }
       } catch (error) {
         // Log error but don't change state on error (allow retry to succeed)
-        if (process.env.NODE_ENV === 'development') {
-          console.error('Health check error:', error);
-        }
+        console.error('❌ Health check error:', error);
         // Don't set to false immediately - allow retry to succeed
         // setIsConnected will be updated on next successful check
       }

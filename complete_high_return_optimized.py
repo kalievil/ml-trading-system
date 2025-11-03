@@ -49,18 +49,18 @@ class OptimizedHighReturnSystem:
         self.slippage_rate = 0.0002    # 0.02%
         self.min_trade_amount = 50.0
         
-        # ===== OPTIMIZED POSITION SIZING (Increased) =====
-        self.base_position_size = 0.30  # 30% base (vs 25% original)
-        self.max_position_size = 0.35   # 35% maximum (vs 30% original)
+        # ===== OPTIMIZED POSITION SIZING (Increased for 150% target) =====
+        self.base_position_size = 0.40  # 40% base (optimized for higher returns)
+        self.max_position_size = 0.48   # 48% maximum (optimized for higher returns)
         
-        # ===== OPTIMIZED STOP-LOSS & TAKE-PROFIT =====
-        self.stop_loss_pct = 0.018    # 1.8% (tighter than 2% original)
-        self.take_profit_pct = 0.015  # 1.5% always (vs 1% original - better R:R)
+        # ===== OPTIMIZED STOP-LOSS & TAKE-PROFIT (Better R:R) =====
+        self.stop_loss_pct = 0.015    # 1.5% (tighter for better R:R ratio)
+        self.take_profit_pct = 0.025  # 2.5% base (increased for higher profits)
         
-        # ===== OPTIMIZED CONFIDENCE THRESHOLDS (More Aggressive) =====
-        self.min_confidence_for_trade = 0.63  # 63% minimum (vs 65% original)
-        self.min_confidence_for_leverage = 0.73  # 73% for any leverage (vs 75%)
-        self.min_confidence_for_max_leverage = 0.88  # 88% for max leverage (vs 90%)
+        # ===== OPTIMIZED CONFIDENCE THRESHOLDS (More Aggressive for 150% target) =====
+        self.min_confidence_for_trade = 0.52  # 52% minimum (optimized for more trades, still safe)
+        self.min_confidence_for_leverage = 0.70  # 70% for any leverage (keep higher for safety)
+        self.min_confidence_for_max_leverage = 0.85  # 85% for max leverage (keep high for safety)
         
         # ===== OPTIMIZED LEVERAGE MANAGEMENT =====
         self.max_leverage = max_leverage  # 5x (vs 4x original)
@@ -75,8 +75,9 @@ class OptimizedHighReturnSystem:
         self.portfolio_drawdown_warning_pct = 0.10  # 10% warning - reduce sizing
         self.daily_loss_limit_pct = 0.05  # 5% daily max loss
         
-        # ===== VOLATILITY FILTER (Slightly More Permissive) =====
-        self.max_volatility_threshold = 0.022  # 2.2% (vs 2% original - more opportunities)
+        # ===== VOLATILITY FILTER (More Permissive but Safe) =====
+        # Mean volatility is ~1.9%, median is ~1.5%, so 3.0% allows more conditions while staying safe
+        self.max_volatility_threshold = 0.030  # 3.0% (increased for more opportunities, still well below extremes)
         
         # ===== KDE MARKET PROFILE PARAMETERS =====
         self.lookback_period = 200
@@ -98,42 +99,87 @@ class OptimizedHighReturnSystem:
         self.drawdown_halts_count = 0
         
         logger.info(f"🚀 Optimized High-Return System initialized (Max Leverage: {max_leverage}x)")
-        logger.info(f"📊 Position Size: {self.base_position_size*100:.0f}%-{self.max_position_size*100:.0f}% (OPTIMIZED)")
-        logger.info(f"📊 Stop-Loss: {self.stop_loss_pct*100:.2f}% | Take-Profit: {self.take_profit_pct*100:.2f}% (OPTIMIZED)")
+        logger.info(f"📊 Position Size: {self.base_position_size*100:.0f}%-{self.max_position_size*100:.0f}% (OPTIMIZED v4 - 150% target)")
+        logger.info(f"📊 Stop-Loss: {self.stop_loss_pct*100:.2f}% | Take-Profit: Dynamic 2.5-4.0% (OPTIMIZED v4)")
+        logger.info(f"📊 Min Confidence: {self.min_confidence_for_trade*100:.0f}% | Volatility Max: {self.max_volatility_threshold*100:.1f}% (OPTIMIZED v3)")
         logger.info(f"📊 MAE Monitoring: {'Active' if self.mae_monitoring_active else 'Inactive'}")
         logger.info(f"📊 Portfolio Max DD: {self.portfolio_max_drawdown_pct*100:.0f}% (UNCHANGED)")
         logger.info(f"📊 Daily Loss Limit: {self.daily_loss_limit_pct*100:.0f}% (UNCHANGED)")
     
     # Copy all other methods from complete_high_return_system.py
     def load_binance_data(self, timeframe='5m'):
-        """Load Binance data"""
+        """Load Binance data - supports both JSON and Feather formats"""
         try:
-            data_path = Path("data/binance/BTC_USDT-5m.json")
-            if not data_path.exists():
-                data_path = Path("../data/binance/BTC_USDT-5m.json")
-            if not data_path.exists():
-                data_path = Path("BTC_USDT-5m.json")
+            # Try JSON files first
+            json_paths = [
+                Path("data/binance/BTC_USDT-5m.json"),
+                Path("../data/binance/BTC_USDT-5m.json"),
+                Path("BTC_USDT-5m.json"),
+                Path("user_data/data/binance/BTC_USDT-5m.json")
+            ]
             
-            if not data_path.exists():
-                logger.error(f"Data file not found: {data_path}")
-                return None
+            for data_path in json_paths:
+                if data_path.exists():
+                    logger.info(f"📂 Loading JSON data from: {data_path}")
+                    with open(data_path, 'r') as f:
+                        data = json.load(f)
+                    
+                    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    
+                    numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+                    for col in numeric_columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    
+                    df = df.dropna()
+                    logger.info(f"✅ Data loaded: {len(df)} records from {df['timestamp'].min()} to {df['timestamp'].max()}")
+                    return df
             
-            with open(data_path, 'r') as f:
-                data = json.load(f)
+            # Try Feather files (Freqtrade format)
+            feather_paths = [
+                Path("user_data/data/binance/futures/BTC_USDT_USDT-5m-futures.feather"),
+                Path("user_data/data/binance/BTC_USDT-5m.feather"),
+                Path("data/binance/BTC_USDT-5m.feather")
+            ]
             
-            df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            for data_path in feather_paths:
+                if data_path.exists():
+                    logger.info(f"📂 Loading Feather data from: {data_path}")
+                    df = pd.read_feather(data_path)
+                    
+                    # Convert Freqtrade format to expected format
+                    if 'date' in df.columns:
+                        df = df.reset_index()
+                        df['timestamp'] = df['date']
+                    elif 'timestamp' not in df.columns and 'time' in df.columns:
+                        df['timestamp'] = pd.to_datetime(df['time'], unit='ms')
+                    
+                    # Ensure we have required columns
+                    if 'timestamp' not in df.columns:
+                        logger.error("❌ Feather file missing timestamp column")
+                        continue
+                    
+                    df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    
+                    numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+                    for col in numeric_columns:
+                        if col in df.columns:
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+                    
+                    df = df.dropna()
+                    logger.info(f"✅ Data loaded: {len(df)} records from {df['timestamp'].min()} to {df['timestamp'].max()}")
+                    return df
             
-            numeric_columns = ['open', 'high', 'low', 'close', 'volume']
-            for col in numeric_columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            df = df.dropna()
-            logger.info(f"✅ Data loaded: {len(df)} records from {df['timestamp'].min()} to {df['timestamp'].max()}")
-            return df
+            logger.error("❌ No data file found. Checked:")
+            logger.error("   JSON: data/binance/BTC_USDT-5m.json")
+            logger.error("   Feather: user_data/data/binance/futures/BTC_USDT_USDT-5m-futures.feather")
+            return None
             
         except Exception as e:
             logger.error(f"Error loading data: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
     
     def calculate_time_weights(self, lookback_period):
@@ -220,7 +266,7 @@ class OptimizedHighReturnSystem:
         logger.info("🔧 Creating features for Optimized High-Return System...")
         
         features = []
-        step_size = 6
+        step_size = 1  # OPTIMIZED v4: Evaluate every 5 min (3x more opportunities for 150% target)
         
         for i in range(self.lookback_period, len(df), step_size):
             if i % 10000 == 0:
@@ -272,6 +318,61 @@ class OptimizedHighReturnSystem:
             hour = df.iloc[i]['timestamp'].hour
             day_of_week = df.iloc[i]['timestamp'].weekday()
             
+            # ===== ADDITIONAL FEATURES FOR 150% TARGET =====
+            
+            # Bollinger Bands
+            bb_period = 20
+            bb_std = 2
+            bb_middle = df.iloc[i-bb_period:i]['close'].mean() if i >= bb_period else current_price
+            bb_std_val = df.iloc[i-bb_period:i]['close'].std() if i >= bb_period else current_price * 0.01
+            bb_upper = bb_middle + (bb_std_val * bb_std)
+            bb_lower = bb_middle - (bb_std_val * bb_std)
+            bb_position = (current_price - bb_lower) / (bb_upper - bb_lower) if bb_upper > bb_lower else 0.5
+            bb_width = (bb_upper - bb_lower) / bb_middle if bb_middle > 0 else 0.02
+            
+            # ADX (trend strength) - simplified
+            if i >= 14:
+                highs = df.iloc[i-14:i]['high'].values
+                lows = df.iloc[i-14:i]['low'].values
+                closes = df.iloc[i-14:i]['close'].values
+                plus_dm = sum([max(0, highs[j] - highs[j-1]) if j > 0 else 0 for j in range(len(highs))])
+                minus_dm = sum([max(0, lows[j-1] - lows[j]) if j > 0 else 0 for j in range(len(lows))])
+                tr_sum = sum([max(highs[j] - lows[j], 
+                                 abs(highs[j] - closes[j-1]) if j > 0 else 0,
+                                 abs(lows[j] - closes[j-1]) if j > 0 else 0) for j in range(len(highs))])
+                adx = abs(plus_dm - minus_dm) / tr_sum * 100 if tr_sum > 0 else 50
+            else:
+                adx = 50
+            
+            # Stochastic Oscillator
+            stoch_period = 14
+            if i >= stoch_period:
+                high_14 = df.iloc[i-stoch_period:i]['high'].max()
+                low_14 = df.iloc[i-stoch_period:i]['low'].min()
+                stoch_k = 100 * (current_price - low_14) / (high_14 - low_14) if high_14 > low_14 else 50
+            else:
+                stoch_k = 50
+            
+            # OBV (On-Balance Volume) - simplified
+            obv = 0
+            for j in range(max(1, i-20), min(i, len(df))):
+                if j > 0 and j < len(df):
+                    if df.iloc[j]['close'] > df.iloc[j-1]['close']:
+                        obv += df.iloc[j]['volume']
+                    elif df.iloc[j]['close'] < df.iloc[j-1]['close']:
+                        obv -= df.iloc[j]['volume']
+            obv_normalized = obv / df.iloc[max(0, i-20):i]['volume'].mean() if i >= 20 and df.iloc[max(0, i-20):i]['volume'].mean() > 0 else 0
+            
+            # Moving Average Crossovers
+            ema_9 = df.iloc[max(0, i-9):i]['close'].mean() if i >= 9 else current_price
+            ema_21 = df.iloc[max(0, i-21):i]['close'].mean() if i >= 21 else current_price
+            ema_50 = df.iloc[max(0, i-50):i]['close'].mean() if i >= 50 else current_price
+            ema_cross_bullish = 1 if (i >= 50 and ema_9 > ema_21 > ema_50) else 0
+            ema_cross_bearish = 1 if (i >= 50 and ema_9 < ema_21 < ema_50) else 0
+            price_vs_ema9 = (current_price - ema_9) / ema_9 if ema_9 > 0 else 0
+            price_vs_ema21 = (current_price - ema_21) / ema_21 if ema_21 > 0 else 0
+            ema_cross_strength = (ema_9 - ema_21) / ema_21 if ema_21 > 0 else 0
+            
             feature_vector = [
                 price_change, volume_ratio, normalized_atr,
                 nearest_support, nearest_resistance,
@@ -281,7 +382,11 @@ class OptimizedHighReturnSystem:
                 higher_high, lower_low, breakout_up, breakout_down,
                 volatility_ratio, price_volatility,
                 hour, day_of_week,
-                volatility
+                volatility,
+                # New features for 150% target
+                bb_position, bb_width, adx, stoch_k, obv_normalized,
+                ema_cross_bullish, ema_cross_bearish,
+                price_vs_ema9, price_vs_ema21, ema_cross_strength
             ]
             
             features.append(feature_vector)
@@ -295,7 +400,11 @@ class OptimizedHighReturnSystem:
             'higher_high', 'lower_low', 'breakout_up', 'breakout_down',
             'volatility_ratio', 'price_volatility',
             'hour', 'day_of_week',
-            'volatility'
+            'volatility',
+            # New features for 150% target
+            'bb_position', 'bb_width', 'adx', 'stoch_k', 'obv_normalized',
+            'ema_cross_bullish', 'ema_cross_bearish',
+            'price_vs_ema9', 'price_vs_ema21', 'ema_cross_strength'
         ]
         
         df_features = pd.DataFrame(features, columns=feature_names)
@@ -360,9 +469,13 @@ class OptimizedHighReturnSystem:
             
             avg_return = (return_1 + return_2) / 2
             
-            if avg_return > 0.015:  # 1.5% target (optimized)
+            # Lower threshold for more trading signals (0.3% = minimum to cover commissions + small profit)
+            # This creates significantly more opportunities to train the model
+            # The model will learn to filter better trades based on features and confidence
+            # Risk controls (stop-loss, max drawdown, daily limits) will protect against losses
+            if avg_return > 0.003:  # 0.3% target (lowered for more signals, but safety filters remain)
                 targets.append(1)  # Long
-            elif avg_return < -0.015:  # 1.5% target (optimized)
+            elif avg_return < -0.003:  # 0.3% target (lowered for more signals, but safety filters remain)
                 targets.append(2)  # Short
             else:
                 targets.append(0)  # Hold
@@ -373,18 +486,22 @@ class OptimizedHighReturnSystem:
         """Create ensemble models"""
         logger.info("🤖 Creating ensemble XGBoost models...")
         
+        # Use scale_pos_weight to balance classes - will be calculated during training
         self.models = {
             'xgboost_performance': xgb.XGBClassifier(
                 n_estimators=200, max_depth=6, learning_rate=0.1,
-                subsample=0.8, colsample_bytree=0.8, random_state=42
+                subsample=0.8, colsample_bytree=0.8, random_state=42,
+                scale_pos_weight=1.0  # Will be adjusted for multi-class
             ),
             'xgboost_aggressive': xgb.XGBClassifier(
                 n_estimators=150, max_depth=7, learning_rate=0.15,
-                subsample=0.85, colsample_bytree=0.85, random_state=42
+                subsample=0.85, colsample_bytree=0.85, random_state=42,
+                scale_pos_weight=1.0
             ),
             'xgboost_balanced': xgb.XGBClassifier(
                 n_estimators=100, max_depth=8, learning_rate=0.2,
-                subsample=0.9, colsample_bytree=0.9, random_state=42
+                subsample=0.9, colsample_bytree=0.9, random_state=42,
+                scale_pos_weight=1.0
             )
         }
         
@@ -411,10 +528,32 @@ class OptimizedHighReturnSystem:
         
         logger.info(f"📊 Data split: {len(X_train)} training, {len(X_test)} testing")
         
+        # Log target distribution
+        unique, counts = np.unique(y_train, return_counts=True)
+        target_dist = dict(zip(unique, counts))
+        total = len(y_train)
+        logger.info(f"📊 Target distribution in training data:")
+        logger.info(f"   - HOLD (0): {target_dist.get(0, 0)} ({target_dist.get(0, 0)/total*100:.1f}%)")
+        logger.info(f"   - LONG (1): {target_dist.get(1, 0)} ({target_dist.get(1, 0)/total*100:.1f}%)")
+        logger.info(f"   - SHORT (2): {target_dist.get(2, 0)} ({target_dist.get(2, 0)/total*100:.1f}%)")
+        
+        # Calculate class weights for balanced training
+        # Give more weight to minority classes (LONG=1, SHORT=2)
+        unique, counts = np.unique(y_train, return_counts=True)
+        class_counts = dict(zip(unique, counts))
+        total = len(y_train)
+        
+        # Calculate weights inversely proportional to class frequency
+        # For multi-class, XGBoost uses sample_weight parameter
+        sample_weights = np.array([
+            total / (len(class_counts) * class_counts.get(label, 1))
+            for label in y_train
+        ])
+        
         model_scores = {}
         for name, model in self.models.items():
-            logger.info(f"🔄 Training {name}...")
-            model.fit(X_train, y_train)
+            logger.info(f"🔄 Training {name} with balanced class weights...")
+            model.fit(X_train, y_train, sample_weight=sample_weights)
             
             train_score = model.score(X_train, y_train)
             test_score = model.score(X_test, y_test)
@@ -485,7 +624,13 @@ class OptimizedHighReturnSystem:
             ensemble_probabilities += weight * prob
         
         final_predictions = np.round(ensemble_predictions).astype(int)
-        confidence_scores = np.max(ensemble_probabilities, axis=1)
+        
+        # Confidence should be the probability of the PREDICTED class (not max across all classes)
+        # For class 0 (HOLD), use class 0 probability; for 1/2 use their respective probabilities
+        confidence_scores = np.array([
+            ensemble_probabilities[i, pred] 
+            for i, pred in enumerate(final_predictions)
+        ])
         
         return final_predictions, confidence_scores
     
@@ -515,23 +660,24 @@ class OptimizedHighReturnSystem:
         return False, None
     
     def calculate_dynamic_leverage(self, confidence, volatility):
-        """Calculate leverage based on confidence and volatility - OPTIMIZED"""
+        """Calculate leverage - OPTIMIZED v4 for 150% target (more aggressive)"""
         if confidence < self.min_confidence_for_leverage:
             return 1.0
         
         if volatility > self.max_volatility_threshold:
             return 1.0
         
-        # OPTIMIZED: More aggressive leverage scaling
-        if confidence >= self.min_confidence_for_max_leverage:
-            leverage_range = self.max_leverage - 3
-            confidence_factor = (confidence - self.min_confidence_for_max_leverage) / (1.0 - self.min_confidence_for_max_leverage)
-            leverage = 3.0 + (leverage_range * confidence_factor)
+        # OPTIMIZED v4: More aggressive leverage scaling for higher returns
+        if confidence >= 0.90:  # Very high confidence
+            leverage = self.max_leverage  # Full 5x
+        elif confidence >= self.min_confidence_for_max_leverage:  # 85%+
+            leverage = 4.0 + ((confidence - 0.85) / 0.05)  # 4x to 5x
         elif confidence >= 0.75:
-            leverage = 2.0 + ((confidence - 0.75) / (self.min_confidence_for_max_leverage - 0.75))
+            leverage = 2.5 + ((confidence - 0.75) / 0.10) * 1.5  # 2.5x to 4x
         else:
-            leverage = 1.5 + ((confidence - self.min_confidence_for_leverage) / (0.75 - self.min_confidence_for_leverage))
+            leverage = 1.5 + ((confidence - self.min_confidence_for_leverage) / 0.05)  # 1.5x to 2.5x
         
+        # Drawdown protection still active (safety first!)
         if self.current_drawdown_pct >= self.portfolio_drawdown_warning_pct:
             leverage *= 0.5
             logger.info(f"⚠️  Leverage reduced due to drawdown warning")
@@ -540,8 +686,8 @@ class OptimizedHighReturnSystem:
     
     def calculate_position_size(self, confidence, volatility):
         """Calculate position size based on confidence - OPTIMIZED"""
-        # OPTIMIZED: Larger base position size
-        position_size = self.base_position_size + (confidence - 0.63) * 0.10  # Adjusted for new threshold
+        # OPTIMIZED: Larger base position size with adjusted threshold
+        position_size = self.base_position_size + (confidence - 0.52) * 0.12  # Adjusted for 52% threshold
         position_size = np.clip(position_size, self.base_position_size, self.max_position_size)
         
         if self.current_drawdown_pct >= self.portfolio_drawdown_warning_pct:
@@ -589,8 +735,24 @@ class OptimizedHighReturnSystem:
         
         return True, leverage, position_size, "All checks passed"
     
+    def calculate_dynamic_take_profit(self, confidence, volatility):
+        """Dynamic take-profit - OPTIMIZED v4 for 150% target"""
+        base_tp = 0.025  # 2.5% base (increased from 1.5%)
+        
+        # Higher confidence = much higher profit target
+        if confidence >= 0.90:
+            return base_tp * 1.6  # 4.0% for very high confidence
+        elif confidence >= 0.85:
+            return base_tp * 1.4  # 3.5% for high confidence
+        elif confidence >= 0.75:
+            return base_tp * 1.2  # 3.0% for good confidence
+        elif confidence >= 0.65:
+            return base_tp * 1.1  # 2.75% for medium confidence
+        else:
+            return base_tp  # 2.5% standard
+    
     def run_backtest(self, use_sample=False):
-        """Run complete backtest"""
+        """Run complete backtest with 80/20 train/test split"""
         logger.info("🚀 Starting Optimized High-Return System Backtest...")
         
         df = self.load_binance_data()
@@ -603,20 +765,33 @@ class OptimizedHighReturnSystem:
             df = df.tail(50000)
             logger.info(f"📊 Using sample: {len(df)} records")
         
+        # Create features on full dataset first
         df_features = self.create_features(df)
         if df_features is None or len(df_features) == 0:
             logger.error("Failed to create features")
             return None
         
-        self.df_with_features = df_features
+        # Split into 80% train and 20% test (chronological split, not random)
+        split_idx = int(len(df_features) * 0.8)
+        df_train = df_features.iloc[:split_idx].copy()
+        df_test = df_features.iloc[split_idx:].copy()
         
+        logger.info(f"📊 Data split: {len(df_train)} training (80%), {len(df_test)} testing (20%)")
+        logger.info(f"📅 Training period: {df_train.iloc[0]['timestamp']} to {df_train.iloc[-1]['timestamp']}")
+        logger.info(f"📅 Testing period: {df_test.iloc[0]['timestamp']} to {df_test.iloc[-1]['timestamp']}")
+        
+        # Store test data for simulation
+        self.df_with_features = df_test
+        
+        # Train models on 80% training data only
         self.create_models()
-        X_test, y_test = self.train_models(df_features)
+        X_test, y_test = self.train_models(df_train)  # Train on df_train, not full dataset
         
-        logger.info("📈 Running optimized high-return backtest...")
+        logger.info("📈 Running optimized high-return backtest on TEST SET (20%)...")
         start_time = datetime.now()
         
-        performance, portfolio = self._run_trading_simulation(df_features)
+        # Run simulation ONLY on test set (20%)
+        performance, portfolio = self._run_trading_simulation(df_test)
         
         end_time = datetime.now()
         logger.info(f"✅ Backtest completed in {(end_time - start_time).total_seconds():.2f} seconds")
@@ -637,12 +812,22 @@ class OptimizedHighReturnSystem:
         
         predictions, confidence_scores = self._ensemble_predict(X_scaled)
         
+        # Diagnostic counters
+        total_signals = 0
+        hold_signals = 0
+        long_signals = 0
+        short_signals = 0
+        low_confidence_count = 0
+        high_volatility_count = 0
+        valid_opportunities = 0
+        
         portfolio = {
             'cash': self.initial_capital,
             'position': 0,
             'position_size': 0,
             'entry_price': 0,
             'entry_time': None,
+            'entry_confidence': 0.0,  # Store entry confidence for dynamic TP
             'leverage': 1.0,
             'trades': [],
             'equity_curve': []
@@ -655,10 +840,27 @@ class OptimizedHighReturnSystem:
             confidence = confidence_scores[i]
             volatility = df.iloc[i]['volatility']
             
+            # Count predictions
+            if prediction == 0:
+                hold_signals += 1
+            elif prediction == 1:
+                long_signals += 1
+            elif prediction == 2:
+                short_signals += 1
+            total_signals += 1
+            
             if portfolio['position'] == 0:
                 should_enter, leverage, position_size, reason = self.should_enter_trade(confidence, volatility)
                 
+                # Track rejection reasons
+                if not should_enter:
+                    if "Confidence" in reason:
+                        low_confidence_count += 1
+                    elif "Volatility" in reason:
+                        high_volatility_count += 1
+                
                 if should_enter and prediction in [1, 2]:
+                    valid_opportunities += 1
                     if prediction == 1:
                         shares = (portfolio['cash'] * position_size * leverage) / current_price
                         cost = shares * current_price
@@ -668,6 +870,7 @@ class OptimizedHighReturnSystem:
                         portfolio['position_size'] = position_size
                         portfolio['entry_price'] = current_price
                         portfolio['entry_time'] = current_time
+                        portfolio['entry_confidence'] = confidence  # Store entry confidence
                         portfolio['leverage'] = leverage
                         portfolio['cash'] -= (cost + commission)
                         
@@ -691,6 +894,7 @@ class OptimizedHighReturnSystem:
                         portfolio['position_size'] = position_size
                         portfolio['entry_price'] = current_price
                         portfolio['entry_time'] = current_time
+                        portfolio['entry_confidence'] = confidence  # Store entry confidence
                         portfolio['leverage'] = leverage
                         portfolio['cash'] += (cost - commission)
                         
@@ -707,7 +911,10 @@ class OptimizedHighReturnSystem:
             
             if portfolio['position'] != 0:
                 stop_loss_price = portfolio['entry_price'] * (1 - self.stop_loss_pct if portfolio['position'] > 0 else 1 + self.stop_loss_pct)
-                take_profit_price = portfolio['entry_price'] * (1 + self.take_profit_pct if portfolio['position'] > 0 else 1 - self.take_profit_pct)
+                # Use dynamic take-profit based on entry confidence (stored when position opened)
+                entry_confidence = portfolio.get('entry_confidence', 0.60)  # Use stored entry confidence
+                dynamic_tp = self.calculate_dynamic_take_profit(entry_confidence, volatility)
+                take_profit_price = portfolio['entry_price'] * (1 + dynamic_tp if portfolio['position'] > 0 else 1 - dynamic_tp)
                 
                 should_close = False
                 close_reason = ""
@@ -761,6 +968,7 @@ class OptimizedHighReturnSystem:
                     portfolio['position_size'] = 0
                     portfolio['entry_price'] = 0
                     portfolio['entry_time'] = None
+                    portfolio['entry_confidence'] = 0.0
                     portfolio['leverage'] = 1.0
             
             current_equity = portfolio['cash'] + (portfolio['position'] * current_price if portfolio['position'] > 0 else 0) + (portfolio['position'] * current_price if portfolio['position'] < 0 else 0)
@@ -772,6 +980,29 @@ class OptimizedHighReturnSystem:
         
         if portfolio['position'] != 0:
             self._close_position(portfolio, df.iloc[-1]['close'], df.iloc[-1]['timestamp'], "end_of_data")
+        
+        # Log diagnostic information
+        logger.info("=" * 80)
+        logger.info("📊 TRADING SIMULATION DIAGNOSTICS:")
+        logger.info(f"   Total signals: {total_signals}")
+        logger.info(f"   - HOLD signals: {hold_signals} ({hold_signals/total_signals*100:.1f}%)")
+        logger.info(f"   - LONG signals: {long_signals} ({long_signals/total_signals*100:.1f}%)")
+        logger.info(f"   - SHORT signals: {short_signals} ({short_signals/total_signals*100:.1f}%)")
+        logger.info(f"   - Valid opportunities (signal + passed filters): {valid_opportunities}")
+        logger.info(f"   - Rejected due to low confidence: {low_confidence_count}")
+        logger.info(f"   - Rejected due to high volatility: {high_volatility_count}")
+        logger.info(f"   - Actual trades executed: {len([t for t in portfolio['trades'] if t['action'] in ['BUY', 'SELL']])}")
+        logger.info("=" * 80)
+        
+        # Sample confidence and volatility stats
+        if len(confidence_scores) > 0:
+            logger.info(f"📈 Confidence stats: min={np.min(confidence_scores):.3f}, max={np.max(confidence_scores):.3f}, mean={np.mean(confidence_scores):.3f}, median={np.median(confidence_scores):.3f}")
+        if 'volatility' in df.columns:
+            vol_values = df['volatility'].values
+            logger.info(f"📊 Volatility stats: min={np.min(vol_values):.4f}, max={np.max(vol_values):.4f}, mean={np.mean(vol_values):.4f}, median={np.median(vol_values):.4f}")
+            logger.info(f"📊 Volatility threshold: {self.max_volatility_threshold:.4f}")
+        logger.info(f"📊 Min confidence threshold: {self.min_confidence_for_trade:.3f}")
+        logger.info("=" * 80)
         
         performance = self._calculate_performance(portfolio)
         
