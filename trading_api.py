@@ -692,7 +692,7 @@ def close_position_sync(position_id, reason):
 
 def automatic_trading_loop():
     """Background loop for automatic ML trading"""
-    global auto_trading_enabled, binance_client, ml_system
+    global auto_trading_enabled, binance_client, ml_system, last_evaluated_bar_time, step_size
     
     while auto_trading_enabled:
         try:
