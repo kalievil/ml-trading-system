@@ -65,6 +65,11 @@ ml_system = None
 auto_trading_enabled = False
 auto_trading_thread = None
 open_positions = {}  # Track open positions for stop-loss/take-profit
+position_closing_in_progress = False  # Lock to prevent multiple simultaneous close operations
+
+# BACKTEST CLONE: Step size tracking (1 barre sur 6 comme backtest)
+last_evaluated_bar_time = None  # Track last bar timestamp we evaluated
+step_size = 6  # Sample every 6th bar (same as backtest) - reduces frequency by 83%
 
 # Credentials file path
 CREDENTIALS_FILE = Path("binance_credentials.json")
@@ -413,6 +418,15 @@ def initialize_ml_system():
 async def startup_event():
     """Initialize on startup"""
     logger.info("🚀 Starting ML Trading API Server...")
+    logger.info("=" * 100)
+    logger.info("🎯 BACKTEST CLONE MODE ENABLED")
+    logger.info(f"   Step Size: {step_size} (evaluates 1 bar out of {step_size} - 83% reduction)")
+    logger.info(f"   Frequency: ~1 evaluation every {step_size * 5} minutes (matches backtest)")
+    logger.info("   TP/SL Detection: HIGH/LOW of bar (not just lastPrice)")
+    logger.info("   Execution: Bar close price (not current market price)")
+    logger.info("   Filters: Confidence threshold + _should_allow_long_signal (exact backtest match)")
+    logger.info("   Position Sizing: Capital variable (compounding allowed)")
+    logger.info("=" * 100)
     
     # Load credentials from file
     api_key, api_secret = load_credentials_from_file()
@@ -433,22 +447,40 @@ async def startup_event():
     logger.info("🤖 Initializing ML system...")
     if initialize_ml_system():
         logger.info("✅ ML system ready")
+        if ml_system:
+            logger.info(f"   Long Confidence Threshold: {ml_system.long_confidence_threshold:.2f}")
+            logger.info(f"   Long Stop Loss: {ml_system.long_stop_loss_pct*100:.2f}%")
+            logger.info(f"   Long Take Profit: {ml_system.long_take_profit_base*100:.2f}%-{ml_system.long_take_profit_max*100:.2f}%")
+            logger.info(f"   Position Size: {ml_system.base_position_size*100:.0f}%-{ml_system.max_position_size*100:.0f}%")
     else:
         logger.error("❌ Failed to initialize ML system")
     
     logger.info("🌐 API Server ready!")
 
 def check_position_management_sync():
-    """Check and manage open positions for stop-loss/take-profit (sync version)"""
+    """Check and manage open positions for stop-loss/take-profit (sync version)
+    
+    BACKTEST CLONE: Uses HIGH/LOW of current bar (like backtest) instead of just lastPrice
+    """
     global open_positions, binance_client
     
     if not binance_client or not open_positions:
         return
     
     try:
-        # Get current BTC price
-        ticker = binance_client.get_ticker(symbol='BTCUSDT')
-        current_price = float(ticker['lastPrice'])
+        # BACKTEST CLONE: Get current bar HIGH/LOW (not just lastPrice)
+        # This matches backtest behavior exactly (checks if HIGH touched TP or LOW touched SL)
+        klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=2)
+        if not klines or len(klines) < 1:
+            return
+        
+        # Get the latest completed bar (last one in array)
+        latest_bar = klines[-1]
+        current_high = float(latest_bar['high'])
+        current_low = float(latest_bar['low'])
+        current_open = float(latest_bar['open'])
+        current_close = float(latest_bar['close'])
+        bar_close_time = int(latest_bar['close_time'])
         
         positions_to_close = []
         
@@ -460,29 +492,36 @@ def check_position_management_sync():
             
             should_close = False
             close_reason = ""
+            exit_price = None
             
             if side == 'BUY':
-                # Long position
-                if current_price <= stop_loss:
+                # Long position - BACKTEST CLONE: Check if LOW touched stop-loss OR HIGH touched take-profit
+                # Priority: Stop-loss first (risk management) - same as backtest
+                if current_low <= stop_loss:
                     should_close = True
                     close_reason = "stop_loss"
-                elif current_price >= take_profit:
+                    exit_price = stop_loss  # Execute at stop-loss price (same as backtest)
+                elif current_high >= take_profit:
                     should_close = True
                     close_reason = "take_profit"
+                    exit_price = take_profit  # Execute at take-profit price (same as backtest)
             else:
                 # Short position (if implemented)
-                if current_price >= stop_loss:
+                # BACKTEST CLONE: Check if HIGH touched stop-loss OR LOW touched take-profit
+                if current_high >= stop_loss:
                     should_close = True
                     close_reason = "stop_loss"
-                elif current_price <= take_profit:
+                    exit_price = stop_loss
+                elif current_low <= take_profit:
                     should_close = True
                     close_reason = "take_profit"
+                    exit_price = take_profit
             
             if should_close:
-                positions_to_close.append((position_id, close_reason))
+                positions_to_close.append((position_id, close_reason, exit_price))
         
         # Close positions that hit stop-loss or take-profit
-        for position_id, reason in positions_to_close:
+        for position_id, reason, exit_price in positions_to_close:
             close_position_sync(position_id, reason)
             
     except Exception as e:
@@ -490,14 +529,22 @@ def check_position_management_sync():
 
 def close_position_sync(position_id, reason):
     """Close a specific position (sync version) - Converts ALL BTC to USDT"""
-    global open_positions, binance_client
+    global open_positions, binance_client, position_closing_in_progress
     
     if position_id not in open_positions:
+        logger.debug(f"⏸️ Position {position_id} not found in tracked positions - already closed?")
+        return
+    
+    # Prevent multiple simultaneous close operations
+    if position_closing_in_progress:
+        logger.warning(f"⚠️ Position closing already in progress - skipping {position_id}")
         return
     
     position = open_positions[position_id]
+    position_closing_in_progress = True
     
     try:
+        logger.info(f"🔒 Closing position: {position_id} - Reason: {reason} - Entry: ${position['entry_price']:.2f}")
         # Get current account balance - check BOTH free and locked BTC
         account = binance_client.get_account()
         btc_balance_free = 0.0
@@ -531,12 +578,13 @@ def close_position_sync(position_id, reason):
                 # Execute SELL order - convert ALL free BTC to USDT
                 # Binance minimum is typically 0.00001 BTC
                 if btc_balance_free >= 0.00001:
+                    logger.info(f"📤 Executing SINGLE market SELL order: {btc_balance_free:.8f} BTC (position: {position_id})")
                     order = binance_client.order_market_sell(
                         symbol='BTCUSDT',
                         quantity=f"{btc_balance_free:.8f}"  # Use 8 decimals for precision
                     )
                     
-                    logger.info(f"✅ Position closed: {position_id} - {reason} - Sold {btc_balance_free:.8f} BTC")
+                    logger.info(f"✅ Position closed: {position_id} - {reason} - Sold {btc_balance_free:.8f} BTC - Order ID: {order.get('orderId', 'N/A')}")
                 else:
                     logger.warning(f"⚠️ BTC balance too small to sell: {btc_balance_free:.8f} BTC (minimum 0.00001)")
             
@@ -566,13 +614,23 @@ def close_position_sync(position_id, reason):
             else:
                 logger.info(f"✅ BTC balance verified: {btc_after_sell:.8f} BTC (near zero)")
             
-        # Remove from tracking
-        del open_positions[position_id]
+        # CRITICAL: Remove from tracking AFTER selling to prevent re-triggering
+        # Wait a bit longer to ensure order is fully processed
+        time.sleep(2)
+        if position_id in open_positions:
+            del open_positions[position_id]
+            logger.info(f"🗑️ Removed position {position_id} from tracking")
+        else:
+            logger.warning(f"⚠️ Position {position_id} was already removed from tracking")
             
     except Exception as e:
         logger.error(f"❌ Error closing position {position_id}: {e}")
         import traceback
         logger.error(f"❌ Traceback: {traceback.format_exc()}")
+    finally:
+        # Always release the lock
+        position_closing_in_progress = False
+        logger.debug(f"🔓 Released position closing lock")
 
 def automatic_trading_loop():
     """Background loop for automatic ML trading"""
@@ -598,7 +656,8 @@ def automatic_trading_loop():
             
             # CRITICAL FIX #0: Check for leftover BTC balance and convert to USDT
             # This ensures we always have 0 BTC when no positions are tracked
-            if not open_positions:
+            # BUT: Skip if position closing is in progress to avoid race conditions
+            if not open_positions and not position_closing_in_progress:
                 try:
                     account = binance_client.get_account()
                     btc_balance = 0.0
@@ -608,20 +667,33 @@ def automatic_trading_loop():
                             break
                     
                     # If there's BTC but no tracked positions, convert it to USDT
+                    # Add delay to ensure previous order is fully processed
                     if btc_balance > 0.00001:  # Above minimum tradeable amount
-                        logger.warning(f"⚠️ Leftover BTC balance detected: {btc_balance:.8f} BTC (no tracked positions) - Converting to USDT...")
+                        logger.warning(f"⚠️ Leftover BTC balance detected: {btc_balance:.8f} BTC (no tracked positions) - Waiting 3s then converting to USDT...")
+                        time.sleep(3)  # Wait to ensure previous orders are settled
                         try:
-                            ticker = binance_client.get_ticker(symbol='BTCUSDT')
-                            current_price = float(ticker['lastPrice'])
+                            # Re-check balance after waiting (might have changed)
+                            account = binance_client.get_account()
+                            btc_balance = 0.0
+                            for balance in account['balances']:
+                                if balance['asset'] == 'BTC':
+                                    btc_balance = float(balance['free'])
+                                    break
                             
-                            # Convert all BTC to USDT
-                            order = binance_client.order_market_sell(
-                                symbol='BTCUSDT',
-                                quantity=f"{btc_balance:.8f}"
-                            )
+                            if btc_balance > 0.00001:  # Still have BTC after waiting
+                                ticker = binance_client.get_ticker(symbol='BTCUSDT')
+                                current_price = float(ticker['lastPrice'])
+                                
+                                # Convert all BTC to USDT - SINGLE order
+                                logger.info(f"📤 Executing SINGLE cleanup SELL order: {btc_balance:.8f} BTC")
+                                order = binance_client.order_market_sell(
+                                    symbol='BTCUSDT',
+                                    quantity=f"{btc_balance:.8f}"
+                                )
+                                logger.info(f"✅ Cleanup order executed - Order ID: {order.get('orderId', 'N/A')}")
                             
                             # Verify conversion
-                            time.sleep(1)
+                            time.sleep(2)  # Longer wait for order to settle
                             account = binance_client.get_account()
                             btc_after = 0.0
                             for balance in account['balances']:
@@ -639,6 +711,69 @@ def automatic_trading_loop():
                 except Exception as check_error:
                     logger.error(f"❌ Error checking BTC balance: {check_error}")
             
+            # BACKTEST CLONE: Apply step_size (only evaluate 1 bar out of 6)
+            # This matches backtest exactly: step_size = 6 means evaluate only every 6th bar
+            try:
+                # Get recent bars to check step_size logic
+                klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=step_size * 2)
+                if not klines or len(klines) < step_size:
+                    time.sleep(10)
+                    continue
+                
+                # Get the latest completed bar (use the one before last to ensure it's closed)
+                # In live trading, the last bar might still be forming
+                latest_bar_index = len(klines) - 2 if len(klines) >= 2 else len(klines) - 1
+                latest_bar_time = int(klines[latest_bar_index]['close_time'])
+                
+                # BACKTEST CLONE: Check if we should evaluate this bar (step_size logic)
+                should_evaluate = False
+                if last_evaluated_bar_time is None:
+                    # First evaluation - evaluate current bar
+                    should_evaluate = True
+                else:
+                    # Find how many bars have passed since last evaluation
+                    bars_since_last = 0
+                    found_last = False
+                    
+                    # Look for last evaluated bar in recent klines
+                    for i in range(latest_bar_index, -1, -1):
+                        if int(klines[i]['close_time']) == last_evaluated_bar_time:
+                            bars_since_last = latest_bar_index - i
+                            found_last = True
+                            break
+                    
+                    # If last evaluated bar not found, check if enough time has passed
+                    if not found_last:
+                        # Calculate time difference (approximate)
+                        time_diff_ms = latest_bar_time - last_evaluated_bar_time
+                        # 5min bars = 300000 ms each
+                        estimated_bars = time_diff_ms // 300000
+                        if estimated_bars >= step_size:
+                            bars_since_last = step_size
+                    
+                    # Evaluate only if step_size bars have passed (same as backtest)
+                    if bars_since_last >= step_size:
+                        should_evaluate = True
+                        logger.debug(f"✅ Step size: {bars_since_last} bars since last evaluation (>= {step_size})")
+                
+                if not should_evaluate:
+                    logger.debug(f"⏸️ Step size: Skipping evaluation - only {bars_since_last if 'bars_since_last' in locals() else 0} bars since last (need {step_size})")
+                    # Still check positions but skip signal evaluation
+                    # Position management happens every loop iteration
+                    time.sleep(30)
+                    continue
+                
+                # Update last evaluated bar time (BACKTEST CLONE)
+                last_evaluated_bar_time = latest_bar_time
+                logger.info(f"📊 BACKTEST CLONE: Evaluating bar {latest_bar_time} (step_size={step_size}, 1 out of {step_size} bars evaluated)")
+                
+            except Exception as step_error:
+                logger.warning(f"⚠️ Error in step_size check: {step_error} - Skipping evaluation this cycle")
+                import traceback
+                logger.debug(f"Traceback: {traceback.format_exc()}")
+                time.sleep(30)
+                continue  # Skip this evaluation cycle if step check fails
+            
             # Get ML signal
             signal_data = get_ml_signal()
             
@@ -651,6 +786,54 @@ def automatic_trading_loop():
                     time.sleep(10)
                     continue
                 
+                # BACKTEST CLONE: Apply EXACT same filters as backtest
+                # This ensures live trading matches backtest behavior (1 trade per 2 days vs 1 trade per 2-4 hours)
+                if signal_data['signal'] == 'BUY':
+                    # BACKTEST CLONE: Apply confidence threshold FIRST (same as backtest line 1288-1291)
+                    confidence = signal_data['confidence']
+                    if confidence < ml_system.long_confidence_threshold:
+                        logger.debug(f"⏸️ BUY signal rejected: confidence {confidence:.3f} < {ml_system.long_confidence_threshold} (backtest filter)")
+                        time.sleep(10)
+                        continue
+                    
+                    # BACKTEST CLONE: Apply _should_allow_long_signal filter (same as backtest line 1293-1299)
+                    try:
+                        # Need to get the features dataframe to check filters
+                        required_klines = max(ml_system.lookback_period + 100, 300)
+                        klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=required_klines)
+                        df = pd.DataFrame(klines, columns=[
+                            'open_time','open','high','low','close','volume','close_time','qav','num_trades','taker_base','taker_quote','ignore'
+                        ])
+                        df = df[['open_time','open','high','low','close','volume']].copy()
+                        df['kline_timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
+                        for col in ['open','high','low','close','volume']:
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+                        df = df.dropna()
+                        df_renamed = df.copy()
+                        df_renamed['timestamp'] = df_renamed['kline_timestamp']
+                        drop_cols = [c for c in ['kline_timestamp', 'open_time'] if c in df_renamed.columns]
+                        if drop_cols:
+                            df_renamed = df_renamed.drop(columns=drop_cols)
+                        
+                        # Get current index (last row) - BACKTEST CLONE
+                        current_idx = len(df_renamed) - 1
+                        prediction = 1  # BUY signal
+                        
+                        # BACKTEST CLONE: Apply the exact same filter as backtest (line 1293)
+                        allowed, reason = ml_system._should_allow_long_signal(df_renamed, current_idx, confidence, prediction)
+                        
+                        if not allowed:
+                            logger.debug(f"⏸️ BUY signal filtered out (backtest filter): {reason}")
+                            time.sleep(10)
+                            continue
+                        else:
+                            logger.debug(f"✅ BUY signal passed all backtest filters: {reason}")
+                    except Exception as filter_error:
+                        logger.warning(f"⚠️ Could not apply backtest filters: {filter_error} - Rejecting trade for safety")
+                        time.sleep(10)
+                        continue  # Reject trade if filter check fails (safer)
+                
+                
                 # CRITICAL FIX #2: DISABLE SELL signals (same as backtest - SHORT trades have 1-3% win rate)
                 # NEVER sell BTC if there are tracked positions - positions must hit TP/SL first
                 if signal_data['signal'] == 'SELL':
@@ -658,6 +841,12 @@ def automatic_trading_loop():
                     # If tracked position exists, BTC belongs to that position - don't sell it!
                     if open_positions:
                         logger.debug(f"⏸️ SELL signal ignored: {len(open_positions)} tracked positions exist - BTC must stay until TP/SL")
+                        time.sleep(10)
+                        continue
+                    
+                    # Also check if position closing is in progress
+                    if position_closing_in_progress:
+                        logger.debug(f"⏸️ SELL signal ignored: Position closing in progress - wait for completion")
                         time.sleep(10)
                         continue
                     
@@ -671,15 +860,27 @@ def automatic_trading_loop():
                                 break
                         
                         if btc_balance > 0.00001:
-                            logger.warning(f"⚠️ SELL signal + leftover BTC (no tracked positions): {btc_balance:.8f} BTC - Converting to USDT")
-                            try:
-                                order = binance_client.order_market_sell(
-                                    symbol='BTCUSDT',
-                                    quantity=f"{btc_balance:.8f}"
-                                )
-                                logger.info(f"✅ Converted leftover BTC: {btc_balance:.8f} BTC to USDT (SELL signal ignored)")
-                            except Exception as convert_error:
-                                logger.error(f"❌ Failed to convert BTC on SELL signal: {convert_error}")
+                            logger.warning(f"⚠️ SELL signal + leftover BTC (no tracked positions): {btc_balance:.8f} BTC - Waiting 3s then converting...")
+                            time.sleep(3)  # Wait to ensure previous orders are settled
+                            
+                            # Re-check balance
+                            account = binance_client.get_account()
+                            btc_balance = 0.0
+                            for balance in account['balances']:
+                                if balance['asset'] == 'BTC':
+                                    btc_balance = float(balance['free'])
+                                    break
+                            
+                            if btc_balance > 0.00001:  # Still have BTC
+                                try:
+                                    logger.info(f"📤 Executing SINGLE SELL signal cleanup order: {btc_balance:.8f} BTC")
+                                    order = binance_client.order_market_sell(
+                                        symbol='BTCUSDT',
+                                        quantity=f"{btc_balance:.8f}"
+                                    )
+                                    logger.info(f"✅ Converted leftover BTC: {btc_balance:.8f} BTC to USDT - Order ID: {order.get('orderId', 'N/A')}")
+                                except Exception as convert_error:
+                                    logger.error(f"❌ Failed to convert BTC on SELL signal: {convert_error}")
                         else:
                             logger.debug(f"⏸️ SELL signal ignored: SHORT trades disabled (no BTC to convert)")
                     except Exception as check_error:
@@ -723,34 +924,48 @@ def automatic_trading_loop():
                             time.sleep(10)
                             continue
                         
+                        # BACKTEST CLONE: Execute at bar close price (not current market price)
+                        # Get the latest completed bar close price (matches backtest execution)
+                        klines_bar = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=1)
+                        if klines_bar and len(klines_bar) > 0:
+                            # Use close price of the bar (same as backtest)
+                            execution_price = float(klines_bar[0]['close'])
+                            logger.debug(f"📊 Using bar close price for execution: {execution_price:.2f} (backtest clone)")
+                        else:
+                            # Fallback to current price if bar not available
+                            execution_price = current_price
+                            logger.warning(f"⚠️ Could not get bar close price, using current price: {current_price:.2f}")
+                        
                         # Calculate BTC quantity from USDT amount
-                        btc_quantity = usdt_to_spend / current_price
+                        btc_quantity = usdt_to_spend / execution_price
                         
                         # Execute BUY order
                         order = binance_client.order_market_buy(
                             symbol='BTCUSDT',
                             quoteOrderQty=f"{usdt_to_spend:.2f}"  # Use quoteOrderQty (USDT amount) instead of quantity
                         )
-                        logger.info(f"✅ Auto-executed BUY order: {order['orderId']} - {usdt_to_spend:.2f} USDT (~{btc_quantity:.6f} BTC)")
+                        logger.info(f"✅ Auto-executed BUY order: {order['orderId']} - {usdt_to_spend:.2f} USDT (~{btc_quantity:.6f} BTC) @ {execution_price:.2f}")
                         
-                        # Track the position for stop-loss/take-profit management
+                        # BACKTEST CLONE: Track the position for stop-loss/take-profit management
                         position_id = f"pos_{int(time.time())}"
                         # Use long_stop_loss_pct from TargetedLongLossFixSystem (0.6%)
                         stop_loss_pct = getattr(ml_system, 'long_stop_loss_pct', 0.006)
-                        stop_loss_price = current_price * (1 - stop_loss_pct)
+                        # BACKTEST CLONE: Use execution price (bar close) for SL/TP calculation
+                        stop_loss_price = execution_price * (1 - stop_loss_pct)
                         # Use dynamic take-profit from signal (already calculated)
-                        take_profit_price = signal_data.get('take_profit', current_price * 1.015)  # Dynamic TP from signal
+                        take_profit_price = signal_data.get('take_profit', execution_price * 1.015)  # Dynamic TP from signal
                         
                         open_positions[position_id] = {
                             'side': 'BUY',
-                            'entry_price': current_price,
+                            'entry_price': execution_price,  # BACKTEST CLONE: Use bar close price, not current price
                             'stop_loss': stop_loss_price,
                             'take_profit': take_profit_price,
                             'entry_time': datetime.now(),
-                            'order_id': order['orderId']
+                            'order_id': order['orderId'],
+                            'entry_confidence': confidence  # Store confidence for logging
                         }
                         
-                        logger.info(f"📊 Position tracked: {position_id} - Entry: {current_price:.2f}, SL: {stop_loss_price:.2f}, TP: {take_profit_price:.2f}")
+                        logger.info(f"📊 Position tracked: {position_id} - Entry: {execution_price:.2f} (bar close), SL: {stop_loss_price:.2f}, TP: {take_profit_price:.2f}, Confidence: {confidence:.1%}")
                     
                 except Exception as trade_error:
                     logger.error(f"❌ Auto-trade execution failed: {trade_error}")
@@ -758,8 +973,10 @@ def automatic_trading_loop():
             else:
                 logger.debug(f"🔍 Auto-trading: Signal {signal_data['signal']} with {signal_data['confidence']:.1%} confidence - No action")
             
-            # Wait 10 seconds before next check
-            time.sleep(10)
+            # BACKTEST CLONE: Wait longer to match backtest frequency (step_size = 6 bars = 30 minutes)
+            # Since we evaluate 1 bar out of 6, we wait for next bar (5 minutes = 300 seconds)
+            # But check more frequently for position management (every 30 seconds)
+            time.sleep(30)  # Check every 30 seconds for position management, but only evaluate signals at step_size intervals
             
         except Exception as e:
             logger.error(f"❌ Auto-trading loop error: {e}")
