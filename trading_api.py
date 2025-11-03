@@ -652,9 +652,16 @@ def automatic_trading_loop():
                     continue
                 
                 # CRITICAL FIX #2: DISABLE SELL signals (same as backtest - SHORT trades have 1-3% win rate)
-                # Also check if BTC balance exists - if so, convert it instead of ignoring
+                # NEVER sell BTC if there are tracked positions - positions must hit TP/SL first
                 if signal_data['signal'] == 'SELL':
-                    # Check if there's actual BTC to sell (shouldn't happen with proper position management)
+                    # CRITICAL: Check if there's a tracked position FIRST
+                    # If tracked position exists, BTC belongs to that position - don't sell it!
+                    if open_positions:
+                        logger.debug(f"⏸️ SELL signal ignored: {len(open_positions)} tracked positions exist - BTC must stay until TP/SL")
+                        time.sleep(10)
+                        continue
+                    
+                    # Only convert BTC if NO tracked positions exist (leftover BTC cleanup only)
                     try:
                         account = binance_client.get_account()
                         btc_balance = 0.0
@@ -664,17 +671,17 @@ def automatic_trading_loop():
                                 break
                         
                         if btc_balance > 0.00001:
-                            logger.warning(f"⚠️ SELL signal + BTC balance detected: {btc_balance:.8f} BTC - Converting to USDT (SHORT trades disabled)")
+                            logger.warning(f"⚠️ SELL signal + leftover BTC (no tracked positions): {btc_balance:.8f} BTC - Converting to USDT")
                             try:
                                 order = binance_client.order_market_sell(
                                     symbol='BTCUSDT',
                                     quantity=f"{btc_balance:.8f}"
                                 )
-                                logger.info(f"✅ Converted {btc_balance:.8f} BTC to USDT (SELL signal ignored)")
+                                logger.info(f"✅ Converted leftover BTC: {btc_balance:.8f} BTC to USDT (SELL signal ignored)")
                             except Exception as convert_error:
                                 logger.error(f"❌ Failed to convert BTC on SELL signal: {convert_error}")
                         else:
-                            logger.debug(f"⏸️ SELL signal ignored: SHORT trades disabled (1-3% win rate)")
+                            logger.debug(f"⏸️ SELL signal ignored: SHORT trades disabled (no BTC to convert)")
                     except Exception as check_error:
                         logger.debug(f"⏸️ SELL signal ignored: SHORT trades disabled (error checking balance: {check_error})")
                     
