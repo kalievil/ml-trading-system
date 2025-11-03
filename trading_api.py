@@ -489,7 +489,7 @@ def check_position_management_sync():
         logger.error(f"❌ Position management error: {e}")
 
 def close_position_sync(position_id, reason):
-    """Close a specific position (sync version)"""
+    """Close a specific position (sync version) - Converts ALL BTC to USDT"""
     global open_positions, binance_client
     
     if position_id not in open_positions:
@@ -498,29 +498,81 @@ def close_position_sync(position_id, reason):
     position = open_positions[position_id]
     
     try:
-        # Get current account balance
+        # Get current account balance - check BOTH free and locked BTC
         account = binance_client.get_account()
-        btc_balance = 0.0
+        btc_balance_free = 0.0
+        btc_balance_locked = 0.0
+        btc_total = 0.0
         
         for balance in account['balances']:
             if balance['asset'] == 'BTC':
-                btc_balance = float(balance['free'])
+                btc_balance_free = float(balance['free'])
+                btc_balance_locked = float(balance['locked'])
+                btc_total = btc_balance_free + btc_balance_locked
                 break
         
-        if btc_balance > 0:
-            # Execute SELL order
-            order = binance_client.order_market_sell(
-                symbol='BTCUSDT',
-                quantity=f"{btc_balance:.6f}"
-            )
+        # CRITICAL FIX: Sell ALL BTC (free + locked) to ensure 0 BTC balance
+        if btc_total > 0:
+            # Wait a moment for any pending orders to settle
+            time.sleep(1)
             
-            logger.info(f"✅ Position closed: {position_id} - {reason} - {btc_balance:.6f} BTC")
+            # Re-check balance after waiting (in case locked became free)
+            account = binance_client.get_account()
+            btc_balance_free = 0.0
+            btc_balance_locked = 0.0
+            for balance in account['balances']:
+                if balance['asset'] == 'BTC':
+                    btc_balance_free = float(balance['free'])
+                    btc_balance_locked = float(balance['locked'])
+                    break
             
-            # Remove from tracking
-            del open_positions[position_id]
+            # Use only FREE balance for immediate sell (locked will be sold when it becomes free)
+            if btc_balance_free > 0:
+                # Execute SELL order - convert ALL free BTC to USDT
+                # Binance minimum is typically 0.00001 BTC
+                if btc_balance_free >= 0.00001:
+                    order = binance_client.order_market_sell(
+                        symbol='BTCUSDT',
+                        quantity=f"{btc_balance_free:.8f}"  # Use 8 decimals for precision
+                    )
+                    
+                    logger.info(f"✅ Position closed: {position_id} - {reason} - Sold {btc_balance_free:.8f} BTC")
+                else:
+                    logger.warning(f"⚠️ BTC balance too small to sell: {btc_balance_free:.8f} BTC (minimum 0.00001)")
+            
+            # If there's locked BTC, log it but it will be sold later when it becomes free
+            if btc_balance_locked > 0:
+                logger.warning(f"⚠️ {btc_balance_locked:.8f} BTC is locked - will be converted when unlocked")
+            
+            # Verify BTC balance is 0 after sell (with small tolerance for rounding)
+            time.sleep(1)  # Wait for order to settle
+            account = binance_client.get_account()
+            btc_after_sell = 0.0
+            for balance in account['balances']:
+                if balance['asset'] == 'BTC':
+                    btc_after_sell = float(balance['free'])
+                    break
+            
+            if btc_after_sell > 0.00001:  # If still > minimum, try selling again
+                logger.warning(f"⚠️ Remaining BTC balance detected: {btc_after_sell:.8f} BTC - Attempting to sell...")
+                try:
+                    order_retry = binance_client.order_market_sell(
+                        symbol='BTCUSDT',
+                        quantity=f"{btc_after_sell:.8f}"
+                    )
+                    logger.info(f"✅ Converted remaining BTC: {btc_after_sell:.8f} BTC")
+                except Exception as retry_error:
+                    logger.error(f"❌ Failed to convert remaining BTC: {retry_error}")
+            else:
+                logger.info(f"✅ BTC balance verified: {btc_after_sell:.8f} BTC (near zero)")
+            
+        # Remove from tracking
+        del open_positions[position_id]
             
     except Exception as e:
         logger.error(f"❌ Error closing position {position_id}: {e}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
 
 def automatic_trading_loop():
     """Background loop for automatic ML trading"""
@@ -544,6 +596,49 @@ def automatic_trading_loop():
             # Note: This is a sync function, so we'll call it directly
             check_position_management_sync()
             
+            # CRITICAL FIX #0: Check for leftover BTC balance and convert to USDT
+            # This ensures we always have 0 BTC when no positions are tracked
+            if not open_positions:
+                try:
+                    account = binance_client.get_account()
+                    btc_balance = 0.0
+                    for balance in account['balances']:
+                        if balance['asset'] == 'BTC':
+                            btc_balance = float(balance['free'])
+                            break
+                    
+                    # If there's BTC but no tracked positions, convert it to USDT
+                    if btc_balance > 0.00001:  # Above minimum tradeable amount
+                        logger.warning(f"⚠️ Leftover BTC balance detected: {btc_balance:.8f} BTC (no tracked positions) - Converting to USDT...")
+                        try:
+                            ticker = binance_client.get_ticker(symbol='BTCUSDT')
+                            current_price = float(ticker['lastPrice'])
+                            
+                            # Convert all BTC to USDT
+                            order = binance_client.order_market_sell(
+                                symbol='BTCUSDT',
+                                quantity=f"{btc_balance:.8f}"
+                            )
+                            
+                            # Verify conversion
+                            time.sleep(1)
+                            account = binance_client.get_account()
+                            btc_after = 0.0
+                            for balance in account['balances']:
+                                if balance['asset'] == 'BTC':
+                                    btc_after = float(balance['free'])
+                                    break
+                            
+                            if btc_after < 0.00001:
+                                logger.info(f"✅ Successfully converted {btc_balance:.8f} BTC to USDT")
+                            else:
+                                logger.warning(f"⚠️ Still {btc_after:.8f} BTC remaining after conversion")
+                        except Exception as convert_error:
+                            logger.error(f"❌ Failed to convert leftover BTC: {convert_error}")
+                            # Continue anyway to avoid blocking the loop
+                except Exception as check_error:
+                    logger.error(f"❌ Error checking BTC balance: {check_error}")
+            
             # Get ML signal
             signal_data = get_ml_signal()
             
@@ -557,8 +652,32 @@ def automatic_trading_loop():
                     continue
                 
                 # CRITICAL FIX #2: DISABLE SELL signals (same as backtest - SHORT trades have 1-3% win rate)
+                # Also check if BTC balance exists - if so, convert it instead of ignoring
                 if signal_data['signal'] == 'SELL':
-                    logger.debug(f"⏸️ SELL signal ignored: SHORT trades disabled (1-3% win rate)")
+                    # Check if there's actual BTC to sell (shouldn't happen with proper position management)
+                    try:
+                        account = binance_client.get_account()
+                        btc_balance = 0.0
+                        for balance in account['balances']:
+                            if balance['asset'] == 'BTC':
+                                btc_balance = float(balance['free'])
+                                break
+                        
+                        if btc_balance > 0.00001:
+                            logger.warning(f"⚠️ SELL signal + BTC balance detected: {btc_balance:.8f} BTC - Converting to USDT (SHORT trades disabled)")
+                            try:
+                                order = binance_client.order_market_sell(
+                                    symbol='BTCUSDT',
+                                    quantity=f"{btc_balance:.8f}"
+                                )
+                                logger.info(f"✅ Converted {btc_balance:.8f} BTC to USDT (SELL signal ignored)")
+                            except Exception as convert_error:
+                                logger.error(f"❌ Failed to convert BTC on SELL signal: {convert_error}")
+                        else:
+                            logger.debug(f"⏸️ SELL signal ignored: SHORT trades disabled (1-3% win rate)")
+                    except Exception as check_error:
+                        logger.debug(f"⏸️ SELL signal ignored: SHORT trades disabled (error checking balance: {check_error})")
+                    
                     time.sleep(10)
                     continue
                 
@@ -1283,7 +1402,10 @@ async def manual_trade(request: ManualTradeRequest):
 
 @app.post("/api/convert-btc-to-usdt")
 async def convert_btc_to_usdt(request: ConvertRequest):
-    """Convert BTC to USDT (useful for getting trading funds)"""
+    """Convert BTC to USDT (useful for getting trading funds)
+    
+    Note: If you want to convert ALL BTC to USDT, set percent=1.0 or use /api/convert-all-btc-to-usdt
+    """
     if not binance_client:
         raise HTTPException(status_code=400, detail="Binance API not configured")
 
@@ -1306,15 +1428,92 @@ async def convert_btc_to_usdt(request: ConvertRequest):
 
         order = binance_client.order_market_sell(
             symbol='BTCUSDT',
-            quantity=f"{btc_to_sell:.6f}"
+            quantity=f"{btc_to_sell:.8f}"  # Use 8 decimals for precision
         )
+        
+        # Verify conversion
+        time.sleep(1)
+        account = binance_client.get_account()
+        btc_after = 0.0
+        for balance in account['balances']:
+            if balance['asset'] == 'BTC':
+                btc_after = float(balance['free'])
+                break
+        
         return {
             "status": "success", 
             "sold_btc": btc_to_sell, 
             "approx_usdt": btc_to_sell * current_price, 
-            "order_id": order['orderId']
+            "order_id": order['orderId'],
+            "remaining_btc": btc_after
         }
     except Exception as e:
+        logger.error(f"❌ Error converting BTC to USDT: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/convert-all-btc-to-usdt")
+async def convert_all_btc_to_usdt():
+    """Convert ALL BTC balance to USDT - ensures 0 BTC balance
+    
+    This is useful for:
+    - Cleaning up leftover BTC after trades
+    - Ensuring no BTC balance remains after position closes
+    - Manual cleanup when needed
+    """
+    if not binance_client:
+        raise HTTPException(status_code=400, detail="Binance API not configured")
+
+    try:
+        account = binance_client.get_account()
+        btc_balance_free = 0.0
+        btc_balance_locked = 0.0
+        
+        for balance in account['balances']:
+            if balance['asset'] == 'BTC':
+                btc_balance_free = float(balance['free'])
+                btc_balance_locked = float(balance['locked'])
+                break
+
+        if btc_balance_free <= 0.00001:
+            return {
+                "status": "success",
+                "message": "No BTC to convert (balance already near zero)",
+                "btc_balance": btc_balance_free,
+                "btc_locked": btc_balance_locked
+            }
+
+        ticker = binance_client.get_ticker(symbol='BTCUSDT')
+        current_price = float(ticker['lastPrice'])
+        
+        # Convert ALL free BTC to USDT
+        order = binance_client.order_market_sell(
+            symbol='BTCUSDT',
+            quantity=f"{btc_balance_free:.8f}"
+        )
+        
+        # Verify conversion
+        time.sleep(1)
+        account = binance_client.get_account()
+        btc_after = 0.0
+        for balance in account['balances']:
+            if balance['asset'] == 'BTC':
+                btc_after = float(balance['free'])
+                break
+        
+        return {
+            "status": "success",
+            "message": "All BTC converted to USDT",
+            "sold_btc": btc_balance_free,
+            "approx_usdt": btc_balance_free * current_price,
+            "order_id": order['orderId'],
+            "remaining_btc": btc_after,
+            "btc_locked": btc_balance_locked,
+            "note": "Locked BTC will be converted when it becomes free"
+        }
+    except Exception as e:
+        logger.error(f"❌ Error converting all BTC to USDT: {e}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/trading-performance")
