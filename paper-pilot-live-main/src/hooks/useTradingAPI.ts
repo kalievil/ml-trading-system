@@ -525,19 +525,29 @@ export const useTradingAPI = () => {
           const hasCredentials = health.binance_configured || health.credentials_from_file;
           const shouldBeConnected = health.ml_system_ready && hasCredentials;
           
-          // Only update state if connection status actually changed
-          setIsConnected(prevConnected => {
-            if (prevConnected !== shouldBeConnected) {
-              return shouldBeConnected;
-            }
-            return prevConnected;
-          });
+          // Debug logging
+          if (process.env.NODE_ENV === 'development') {
+            console.log('Health check:', {
+              ml_system_ready: health.ml_system_ready,
+              binance_configured: health.binance_configured,
+              credentials_from_file: health.credentials_from_file,
+              hasCredentials,
+              shouldBeConnected
+            });
+          }
+          
+          // Update connection status
+          setIsConnected(shouldBeConnected);
         } else {
           setIsConnected(false);
         }
       } catch (error) {
-        // Only set to false if we were previously connected
-        setIsConnected(prevConnected => prevConnected ? false : prevConnected);
+        // Log error but don't change state on error (allow retry to succeed)
+        if (process.env.NODE_ENV === 'development') {
+          console.error('Health check error:', error);
+        }
+        // Don't set to false immediately - allow retry to succeed
+        // setIsConnected will be updated on next successful check
       }
     };
 
