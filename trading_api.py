@@ -773,6 +773,7 @@ def automatic_trading_loop():
             
             # BACKTEST CLONE: Apply step_size (only evaluate 1 bar out of 6)
             # This matches backtest exactly: step_size = 6 means evaluate only every 6th bar
+            # In backtest, step_size is applied in create_targeted_features() - we apply it here for live trading
             try:
                 # Get recent bars to check step_size logic
                 klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=step_size * 2)
@@ -789,12 +790,15 @@ def automatic_trading_loop():
                 
                 # BACKTEST CLONE: Check if we should evaluate this bar (step_size logic)
                 should_evaluate = False
+                bars_since_last = 0
+                
                 if last_evaluated_bar_time is None:
-                    # First evaluation - evaluate current bar
+                    # First evaluation - evaluate current bar (BACKTEST: evaluates first bar after lookback)
                     should_evaluate = True
+                    bars_since_last = step_size  # Treat as if step_size bars passed
+                    logger.debug(f"📊 First evaluation - evaluating bar {latest_bar_time}")
                 else:
                     # Find how many bars have passed since last evaluation
-                    bars_since_last = 0
                     found_last = False
                     
                     # Look for last evaluated bar in recent klines
@@ -813,22 +817,26 @@ def automatic_trading_loop():
                         estimated_bars = time_diff_ms // 300000
                         if estimated_bars >= step_size:
                             bars_since_last = step_size
+                            should_evaluate = True
+                            logger.debug(f"📊 Estimated {estimated_bars} bars passed (>= {step_size}) - evaluating")
                     
                     # Evaluate only if step_size bars have passed (same as backtest)
                     if bars_since_last >= step_size:
                         should_evaluate = True
                         logger.debug(f"✅ Step size: {bars_since_last} bars since last evaluation (>= {step_size})")
+                    else:
+                        logger.debug(f"⏸️ Step size: Only {bars_since_last} bars since last evaluation (need {step_size})")
                 
                 if not should_evaluate:
-                    logger.debug(f"⏸️ Step size: Skipping evaluation - only {bars_since_last if 'bars_since_last' in locals() else 0} bars since last (need {step_size})")
-                    # Still check positions but skip signal evaluation
+                    # Still check positions but skip signal evaluation (BACKTEST: TP/SL checked every bar)
                     # Position management happens every loop iteration (real-time TP/SL check)
                     time.sleep(2)  # Check TP/SL every 2 seconds even when skipping signal evaluation
                     continue
                 
-                # Update last evaluated bar time (BACKTEST CLONE)
+                # BACKTEST CLONE: Update last evaluated bar time BEFORE getting signal
+                # This ensures we don't evaluate the same bar twice
                 last_evaluated_bar_time = latest_bar_time
-                logger.info(f"📊 BACKTEST CLONE: Evaluating bar {latest_bar_time} (step_size={step_size}, 1 out of {step_size} bars evaluated)")
+                logger.info(f"📊 BACKTEST CLONE: Evaluating bar {latest_bar_time} (step_size={step_size}, {bars_since_last} bars since last, 1 out of {step_size} bars evaluated)")
                 
             except Exception as step_error:
                 logger.warning(f"⚠️ Error in step_size check: {step_error} - Skipping evaluation this cycle")
@@ -837,16 +845,19 @@ def automatic_trading_loop():
                 time.sleep(2)  # Still check TP/SL every 2 seconds even if step check fails
                 continue  # Skip this evaluation cycle if step check fails
             
-
-                    # Get ML signal
+            # Get ML signal (BACKTEST CLONE: only called when step_size allows)
+            # This matches backtest: get_ml_signal() corresponds to one row in df_features (which has step_size applied)
+            logger.info(f"🔍 Getting ML signal for bar {latest_bar_time} (step_size evaluation passed)")
             signal_data = get_ml_signal()
+            logger.info(f"📊 ML Signal received: {signal_data.get('signal')} with {signal_data.get('confidence', 0)*100:.1f}% confidence")
             
             # Check if signal meets criteria for automatic execution
             # Use same threshold as backtest for consistency (42% = 68% win rate)
             if signal_data['confidence'] >= 0.42 and signal_data['signal'] != 'HOLD':
+                logger.info(f"✅ Signal meets threshold: {signal_data['signal']} with {signal_data['confidence']*100:.1f}% >= 42% threshold")
                 # CRITICAL FIX #1: Check if we already have open positions (prevent multiple simultaneous trades)
                 if signal_data['signal'] == 'BUY' and open_positions:
-                    logger.debug(f"⏸️ BUY signal ignored: {len(open_positions)} open positions already exist")
+                    logger.info(f"⏸️ BUY signal ignored: {len(open_positions)} open positions already exist")
                     time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                     continue
                 
@@ -855,10 +866,12 @@ def automatic_trading_loop():
                 if signal_data['signal'] == 'BUY':
                     # BACKTEST CLONE: Apply confidence threshold FIRST (same as backtest line 1288-1291)
                     confidence = signal_data['confidence']
+                    logger.info(f"🔍 Checking confidence threshold: {confidence:.3f} >= {ml_system.long_confidence_threshold}?")
                     if confidence < ml_system.long_confidence_threshold:
-                        logger.debug(f"⏸️ BUY signal rejected: confidence {confidence:.3f} < {ml_system.long_confidence_threshold} (backtest filter)")
+                        logger.info(f"⏸️ BUY signal rejected: confidence {confidence:.3f} < {ml_system.long_confidence_threshold} (backtest filter)")
                         time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                         continue
+                    logger.info(f"✅ Confidence check passed: {confidence:.3f} >= {ml_system.long_confidence_threshold}")
                     
                     # BACKTEST CLONE: Apply _should_allow_long_signal filter (same as backtest line 1293-1299)
                     try:
@@ -887,11 +900,11 @@ def automatic_trading_loop():
                         allowed, reason = ml_system._should_allow_long_signal(df_renamed, current_idx, confidence, prediction)
                         
                         if not allowed:
-                            logger.debug(f"⏸️ BUY signal filtered out (backtest filter): {reason}")
+                            logger.info(f"⏸️ BUY signal filtered out (backtest filter): {reason}")
                             time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                             continue
                         else:
-                            logger.debug(f"✅ BUY signal passed all backtest filters: {reason}")
+                            logger.info(f"✅ BUY signal passed all backtest filters: {reason}")
                     except Exception as filter_error:
                         logger.warning(f"⚠️ Could not apply backtest filters: {filter_error} - Rejecting trade for safety")
                         time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
@@ -996,9 +1009,10 @@ def automatic_trading_loop():
                         # Get the latest completed bar close price (matches backtest execution)
                         klines_bar = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=1)
                         if klines_bar and len(klines_bar) > 0:
-                            # Use close price of the bar (same as backtest)
-                            execution_price = float(klines_bar[0]['close'])
-                            logger.debug(f"📊 Using bar close price for execution: {execution_price:.2f} (backtest clone)")
+                            # Binance returns list of lists: [open_time, open, high, low, close, volume, close_time, ...]
+                            # close price is at index 4
+                            execution_price = float(klines_bar[0][4])
+                            logger.info(f"📊 Using bar close price for execution: {execution_price:.2f} (backtest clone)")
                         else:
                             # Fallback to current price if bar not available
                             execution_price = current_price
@@ -1043,7 +1057,7 @@ def automatic_trading_loop():
                     logger.error(f"❌ Auto-trade execution failed: {trade_error}")
             
             else:
-                logger.debug(f"🔍 Auto-trading: Signal {signal_data['signal']} with {signal_data['confidence']:.1%} confidence - No action")
+                logger.info(f"🔍 Auto-trading: Signal {signal_data['signal']} with {signal_data['confidence']:.1%} confidence - No action (below threshold or HOLD)")
             
             # REAL-TIME TP/SL DETECTION: Check position management very frequently (like TradingView)
             # Signal evaluation still follows step_size (every 6 bars = 30 minutes)
