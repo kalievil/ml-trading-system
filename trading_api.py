@@ -782,8 +782,10 @@ def automatic_trading_loop():
                 
                 # Get the latest completed bar (use the one before last to ensure it's closed)
                 # In live trading, the last bar might still be forming
+                # Binance returns list of lists: [open_time, open, high, low, close, volume, close_time, ...]
+                # close_time is at index 6
                 latest_bar_index = len(klines) - 2 if len(klines) >= 2 else len(klines) - 1
-                latest_bar_time = int(klines[latest_bar_index]['close_time'])
+                latest_bar_time = int(klines[latest_bar_index][6])
                 
                 # BACKTEST CLONE: Check if we should evaluate this bar (step_size logic)
                 should_evaluate = False
@@ -797,7 +799,8 @@ def automatic_trading_loop():
                     
                     # Look for last evaluated bar in recent klines
                     for i in range(latest_bar_index, -1, -1):
-                        if int(klines[i]['close_time']) == last_evaluated_bar_time:
+                        # close_time is at index 6
+                        if int(klines[i][6]) == last_evaluated_bar_time:
                             bars_since_last = latest_bar_index - i
                             found_last = True
                             break
@@ -1191,7 +1194,9 @@ def get_ml_signal():
             step_klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=step_size * 2)
             if step_klines and len(step_klines) >= step_size:
                 latest_bar_index = len(step_klines) - 2 if len(step_klines) >= 2 else len(step_klines) - 1
-                latest_bar_time = int(step_klines[latest_bar_index]['close_time'])
+                # Binance returns list of lists: [open_time, open, high, low, close, volume, close_time, ...]
+                # close_time is at index 6
+                latest_bar_time = int(step_klines[latest_bar_index][6])
                 
                 if last_evaluated_bar_time is None:
                     # First evaluation - evaluating bar 1
@@ -1201,7 +1206,8 @@ def get_ml_signal():
                     bars_since_last = 0
                     found_last = False
                     for i in range(latest_bar_index, -1, -1):
-                        if int(step_klines[i]['close_time']) == last_evaluated_bar_time:
+                        # close_time is at index 6
+                        if int(step_klines[i][6]) == last_evaluated_bar_time:
                             bars_since_last = latest_bar_index - i
                             found_last = True
                             break
