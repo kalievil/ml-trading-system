@@ -3,7 +3,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RefreshCw, TrendingUp, TrendingDown, DollarSign } from "lucide-react";
-import { cn } from "../../lib/utils.ts";
+import { cn } from "../../lib/utils.ts";  
 import { useRealTradingData } from "@/hooks/useRealTradingData";
 
 const TradeHistory = () => {
@@ -47,8 +47,14 @@ const TradeHistory = () => {
   }
 
   // Helper function to format time
-  const formatTime = (timestamp: number) => {
-    return new Date(timestamp).toLocaleString();
+  const formatTime = (timestamp: number | string) => {
+    // Handle both Unix timestamp (ms) and ISO string
+    if (typeof timestamp === 'string') {
+      return new Date(timestamp).toLocaleString();
+    }
+    // If timestamp is in seconds, convert to ms
+    const ts = timestamp > 10000000000 ? timestamp : timestamp * 1000;
+    return new Date(ts).toLocaleString();
   };
 
   return (
@@ -85,41 +91,94 @@ const TradeHistory = () => {
                       <TableHead>Type</TableHead>
                       <TableHead className="text-right">Quantity</TableHead>
                       <TableHead className="text-right">Price</TableHead>
+                      <TableHead className="text-right">Exit Reason</TableHead>
+                      <TableHead className="text-right">P&L Realized</TableHead>
+                      <TableHead className="text-right">P&L %</TableHead>
                       <TableHead className="text-right">Total Value</TableHead>
                       <TableHead className="text-right">Commission</TableHead>
                     </TableRow>
                   </TableHeader>
               <TableBody>
-                {tradeHistory.map((trade) => (
-                  <TableRow key={trade.id} className="hover:bg-muted/50">
-                    <TableCell className="text-sm text-muted-foreground">
-                      {formatTime(trade.time)}
-                    </TableCell>
-                    <TableCell className="font-medium">{trade.symbol}</TableCell>
-                    <TableCell>
-                      <Badge 
-                        variant={trade.side === 'BUY' ? 'default' : 'destructive'}
-                        className={cn(
-                          trade.side === 'BUY' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                {tradeHistory.map((trade) => {
+                  const isProfit = trade.realized_pnl !== null && trade.realized_pnl !== undefined && trade.realized_pnl > 0;
+                  const isLoss = trade.realized_pnl !== null && trade.realized_pnl !== undefined && trade.realized_pnl < 0;
+                  const exitReason = trade.exit_reason;
+                  
+                  return (
+                    <TableRow key={trade.id} className="hover:bg-muted/50">
+                      <TableCell className="text-sm text-muted-foreground">
+                        {formatTime(trade.time)}
+                      </TableCell>
+                      <TableCell className="font-medium">{trade.symbol}</TableCell>
+                      <TableCell>
+                        <Badge 
+                          variant={trade.side === 'BUY' ? 'default' : 'destructive'}
+                          className={cn(
+                            trade.side === 'BUY' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                          )}
+                        >
+                          {trade.side}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right mono-nums">
+                        {trade.quantity.toFixed(6)} BTC
+                      </TableCell>
+                      <TableCell className="text-right mono-nums">
+                        ${trade.price.toLocaleString()}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {exitReason ? (
+                          <Badge 
+                            variant="outline"
+                            className={cn(
+                              exitReason === 'take_profit' ? 'bg-green-50 text-green-700 border-green-200' : 
+                              exitReason === 'stop_loss' ? 'bg-red-50 text-red-700 border-red-200' : 
+                              'bg-gray-50 text-gray-700'
+                            )}
+                          >
+                            {exitReason === 'take_profit' ? '🟢 TP' : exitReason === 'stop_loss' ? '🔴 SL' : exitReason}
+                          </Badge>
+                        ) : (
+                          <span className="text-muted-foreground text-sm">-</span>
                         )}
-                      >
-                        {trade.side}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right mono-nums">
-                      {trade.quantity.toFixed(6)} BTC
-                    </TableCell>
-                    <TableCell className="text-right mono-nums">
-                      ${trade.price.toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-right mono-nums">
-                      ${(trade.quantity * trade.price).toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-right mono-nums">
-                      {trade.commission.toFixed(6)} {trade.commission_asset}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                      </TableCell>
+                      <TableCell className={cn(
+                        "text-right mono-nums font-medium",
+                        isProfit && "text-green-600",
+                        isLoss && "text-red-600"
+                      )}>
+                        {trade.realized_pnl !== null && trade.realized_pnl !== undefined ? (
+                          <>
+                            {isProfit && '+'}
+                            ${trade.realized_pnl.toFixed(2)}
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </TableCell>
+                      <TableCell className={cn(
+                        "text-right mono-nums font-medium",
+                        isProfit && "text-green-600",
+                        isLoss && "text-red-600"
+                      )}>
+                        {trade.realized_pnl_percent !== null && trade.realized_pnl_percent !== undefined ? (
+                          <>
+                            {isProfit && '+'}
+                            {trade.realized_pnl_percent.toFixed(2)}%
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right mono-nums">
+                        ${(trade.quantity * trade.price).toLocaleString()}
+                      </TableCell>
+                      <TableCell className="text-right mono-nums">
+                        {trade.commission.toFixed(6)} {trade.commission_asset}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>

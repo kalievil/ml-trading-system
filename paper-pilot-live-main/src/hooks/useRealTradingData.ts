@@ -12,6 +12,15 @@ export interface RealTrade {
   time: number;
   is_buyer: boolean;
   is_maker: boolean;
+  // TP/SL and P&L info
+  exit_reason?: string | null;  // 'stop_loss' or 'take_profit'
+  realized_pnl?: number | null;
+  realized_pnl_percent?: number | null;
+  unrealized_pnl?: number | null;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  stop_loss?: number | null;
+  take_profit?: number | null;
 }
 
 export interface RealPosition {

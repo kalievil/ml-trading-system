@@ -66,6 +66,7 @@ auto_trading_enabled = False
 auto_trading_thread = None
 open_positions = {}  # Track open positions for stop-loss/take-profit
 position_closing_in_progress = False  # Lock to prevent multiple simultaneous close operations
+completed_trades_history = []  # Track completed trades with TP/SL info and P&L
 
 # BACKTEST CLONE: Step size tracking (1 barre sur 6 comme backtest)
 last_evaluated_bar_time = None  # Track last bar timestamp we evaluated
@@ -419,10 +420,10 @@ async def startup_event():
     """Initialize on startup"""
     logger.info("🚀 Starting ML Trading API Server...")
     logger.info("=" * 100)
-    logger.info("🎯 BACKTEST CLONE MODE ENABLED")
+    logger.info("🎯 BACKTEST CLONE MODE ENABLED + REAL-TIME TP/SL (TradingView Style)")
     logger.info(f"   Step Size: {step_size} (evaluates 1 bar out of {step_size} - 83% reduction)")
-    logger.info(f"   Frequency: ~1 evaluation every {step_size * 5} minutes (matches backtest)")
-    logger.info("   TP/SL Detection: HIGH/LOW of bar (not just lastPrice)")
+    logger.info(f"   Signal Frequency: ~1 evaluation every {step_size * 5} minutes (matches backtest)")
+    logger.info("   TP/SL Detection: REAL-TIME (every 2 seconds) - Current market price (TradingView style)")
     logger.info("   Execution: Bar close price (not current market price)")
     logger.info("   Filters: Confidence threshold + _should_allow_long_signal (exact backtest match)")
     logger.info("   Position Sizing: Capital variable (compounding allowed)")
@@ -460,7 +461,8 @@ async def startup_event():
 def check_position_management_sync():
     """Check and manage open positions for stop-loss/take-profit (sync version)
     
-    BACKTEST CLONE: Uses HIGH/LOW of current bar (like backtest) instead of just lastPrice
+    REAL-TIME DETECTION (TradingView style): Uses current market price for immediate TP/SL detection
+    This ensures positions close instantly when price touches TP or SL, without waiting for bar close
     """
     global open_positions, binance_client
     
@@ -468,19 +470,10 @@ def check_position_management_sync():
         return
     
     try:
-        # BACKTEST CLONE: Get current bar HIGH/LOW (not just lastPrice)
-        # This matches backtest behavior exactly (checks if HIGH touched TP or LOW touched SL)
-        klines = binance_client.get_klines(symbol='BTCUSDT', interval='5m', limit=2)
-        if not klines or len(klines) < 1:
-            return
-        
-        # Get the latest completed bar (last one in array)
-        latest_bar = klines[-1]
-        current_high = float(latest_bar['high'])
-        current_low = float(latest_bar['low'])
-        current_open = float(latest_bar['open'])
-        current_close = float(latest_bar['close'])
-        bar_close_time = int(latest_bar['close_time'])
+        # REAL-TIME: Get current market price (like TradingView)
+        # This allows immediate detection when price touches TP/SL
+        ticker = binance_client.get_ticker(symbol='BTCUSDT')
+        current_price = float(ticker['lastPrice'])
         
         positions_to_close = []
         
@@ -495,27 +488,31 @@ def check_position_management_sync():
             exit_price = None
             
             if side == 'BUY':
-                # Long position - BACKTEST CLONE: Check if LOW touched stop-loss OR HIGH touched take-profit
-                # Priority: Stop-loss first (risk management) - same as backtest
-                if current_low <= stop_loss:
+                # Long position - REAL-TIME: Check if current price touched stop-loss OR take-profit
+                # Priority: Stop-loss first (risk management)
+                if current_price <= stop_loss:
                     should_close = True
                     close_reason = "stop_loss"
-                    exit_price = stop_loss  # Execute at stop-loss price (same as backtest)
-                elif current_high >= take_profit:
+                    exit_price = stop_loss  # Execute at stop-loss price
+                    logger.info(f"🔴 STOP LOSS triggered: Price {current_price:.2f} <= SL {stop_loss:.2f} (Position: {position_id})")
+                elif current_price >= take_profit:
                     should_close = True
                     close_reason = "take_profit"
-                    exit_price = take_profit  # Execute at take-profit price (same as backtest)
+                    exit_price = take_profit  # Execute at take-profit price
+                    logger.info(f"🟢 TAKE PROFIT triggered: Price {current_price:.2f} >= TP {take_profit:.2f} (Position: {position_id})")
             else:
                 # Short position (if implemented)
-                # BACKTEST CLONE: Check if HIGH touched stop-loss OR LOW touched take-profit
-                if current_high >= stop_loss:
+                # REAL-TIME: Check if current price touched stop-loss OR take-profit
+                if current_price >= stop_loss:
                     should_close = True
                     close_reason = "stop_loss"
                     exit_price = stop_loss
-                elif current_low <= take_profit:
+                    logger.info(f"🔴 STOP LOSS triggered: Price {current_price:.2f} >= SL {stop_loss:.2f} (Position: {position_id})")
+                elif current_price <= take_profit:
                     should_close = True
                     close_reason = "take_profit"
                     exit_price = take_profit
+                    logger.info(f"🟢 TAKE PROFIT triggered: Price {current_price:.2f} <= TP {take_profit:.2f} (Position: {position_id})")
             
             if should_close:
                 positions_to_close.append((position_id, close_reason, exit_price))
@@ -614,6 +611,67 @@ def close_position_sync(position_id, reason):
             else:
                 logger.info(f"✅ BTC balance verified: {btc_after_sell:.8f} BTC (near zero)")
             
+        # Get the actual exit price from the order (if available) or use stop_loss/take_profit price
+        exit_price = position.get('stop_loss') if reason == 'stop_loss' else position.get('take_profit')
+        exit_order_id = None
+        
+        # Try to get actual execution price from Binance trades
+        try:
+            # Get recent trades to find the actual exit execution price
+            recent_trades = binance_client.get_my_trades(symbol='BTCUSDT', limit=10)
+            if recent_trades:
+                # Find the most recent SELL trade (exit)
+                for trade in reversed(recent_trades):
+                    if not trade.get('isBuyer', True):  # SELL trade
+                        exit_price = float(trade['price'])
+                        exit_order_id = str(trade.get('orderId', ''))
+                        break
+        except Exception as e:
+            logger.debug(f"Could not get actual exit price from trades: {e}")
+        
+        # If we have an order from the sell operation, use its order ID
+        if 'order' in locals() and order:
+            exit_order_id = str(order.get('orderId', ''))
+        
+        # Calculate P&L (Realized)
+        entry_price = position['entry_price']
+        btc_quantity = position.get('quantity', btc_total) if 'quantity' in position else btc_total
+        
+        if exit_price and entry_price and btc_quantity > 0:
+            # For LONG: P&L = (exit_price - entry_price) * quantity
+            realized_pnl = (exit_price - entry_price) * btc_quantity
+            realized_pnl_percent = ((exit_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+            
+            # Calculate unrealized P&L at entry (should be 0, but for tracking purposes)
+            unrealized_pnl_at_entry = 0.0
+            
+            # Store completed trade information
+            completed_trade = {
+                'position_id': position_id,
+                'entry_price': entry_price,
+                'exit_price': exit_price,
+                'quantity': btc_quantity,
+                'side': position['side'],
+                'entry_time': position.get('entry_time', datetime.now()),
+                'exit_time': datetime.now(),
+                'exit_reason': reason,  # 'stop_loss' or 'take_profit'
+                'stop_loss': position.get('stop_loss'),
+                'take_profit': position.get('take_profit'),
+                'realized_pnl': realized_pnl,
+                'realized_pnl_percent': realized_pnl_percent,
+                'unrealized_pnl_at_entry': unrealized_pnl_at_entry,
+                'order_id': position.get('order_id'),
+                'exit_order_id': exit_order_id
+            }
+            
+            # Add to completed trades history (keep last 1000 trades)
+            global completed_trades_history
+            completed_trades_history.append(completed_trade)
+            if len(completed_trades_history) > 1000:
+                completed_trades_history = completed_trades_history[-1000:]
+            
+            logger.info(f"📊 Trade completed: {position_id} - {reason.upper()} - P&L: ${realized_pnl:.2f} ({realized_pnl_percent:.2f}%) - Entry: ${entry_price:.2f}, Exit: ${exit_price:.2f}")
+        
         # CRITICAL: Remove from tracking AFTER selling to prevent re-triggering
         # Wait a bit longer to ensure order is fully processed
         time.sleep(2)
@@ -667,10 +725,11 @@ def automatic_trading_loop():
                             break
                     
                     # If there's BTC but no tracked positions, convert it to USDT
-                    # Add delay to ensure previous order is fully processed
+                    # Real-time: Quick conversion with minimal delay
                     if btc_balance > 0.00001:  # Above minimum tradeable amount
-                        logger.warning(f"⚠️ Leftover BTC balance detected: {btc_balance:.8f} BTC (no tracked positions) - Waiting 3s then converting to USDT...")
-                        time.sleep(3)  # Wait to ensure previous orders are settled
+                        logger.warning(f"⚠️ Leftover BTC balance detected: {btc_balance:.8f} BTC (no tracked positions) - Converting immediately...")
+                        # Minimal delay to ensure previous orders are settled (reduced from 3s to 1s for real-time)
+                        time.sleep(1)
                         try:
                             # Re-check balance after waiting (might have changed)
                             account = binance_client.get_account()
@@ -681,11 +740,12 @@ def automatic_trading_loop():
                                     break
                             
                             if btc_balance > 0.00001:  # Still have BTC after waiting
+                                # Real-time: Get current market price for conversion
                                 ticker = binance_client.get_ticker(symbol='BTCUSDT')
                                 current_price = float(ticker['lastPrice'])
                                 
-                                # Convert all BTC to USDT - SINGLE order
-                                logger.info(f"📤 Executing SINGLE cleanup SELL order: {btc_balance:.8f} BTC")
+                                # Convert all BTC to USDT - SINGLE order (market order = real-time price)
+                                logger.info(f"📤 Executing SINGLE cleanup SELL order: {btc_balance:.8f} BTC @ ${current_price:.2f}")
                                 order = binance_client.order_market_sell(
                                     symbol='BTCUSDT',
                                     quantity=f"{btc_balance:.8f}"
@@ -759,8 +819,8 @@ def automatic_trading_loop():
                 if not should_evaluate:
                     logger.debug(f"⏸️ Step size: Skipping evaluation - only {bars_since_last if 'bars_since_last' in locals() else 0} bars since last (need {step_size})")
                     # Still check positions but skip signal evaluation
-                    # Position management happens every loop iteration
-                    time.sleep(30)
+                    # Position management happens every loop iteration (real-time TP/SL check)
+                    time.sleep(2)  # Check TP/SL every 2 seconds even when skipping signal evaluation
                     continue
                 
                 # Update last evaluated bar time (BACKTEST CLONE)
@@ -771,7 +831,7 @@ def automatic_trading_loop():
                 logger.warning(f"⚠️ Error in step_size check: {step_error} - Skipping evaluation this cycle")
                 import traceback
                 logger.debug(f"Traceback: {traceback.format_exc()}")
-                time.sleep(30)
+                time.sleep(2)  # Still check TP/SL every 2 seconds even if step check fails
                 continue  # Skip this evaluation cycle if step check fails
             
             # Get ML signal
@@ -783,7 +843,7 @@ def automatic_trading_loop():
                 # CRITICAL FIX #1: Check if we already have open positions (prevent multiple simultaneous trades)
                 if signal_data['signal'] == 'BUY' and open_positions:
                     logger.debug(f"⏸️ BUY signal ignored: {len(open_positions)} open positions already exist")
-                    time.sleep(10)
+                    time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                     continue
                 
                 # BACKTEST CLONE: Apply EXACT same filters as backtest
@@ -793,7 +853,7 @@ def automatic_trading_loop():
                     confidence = signal_data['confidence']
                     if confidence < ml_system.long_confidence_threshold:
                         logger.debug(f"⏸️ BUY signal rejected: confidence {confidence:.3f} < {ml_system.long_confidence_threshold} (backtest filter)")
-                        time.sleep(10)
+                        time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                         continue
                     
                     # BACKTEST CLONE: Apply _should_allow_long_signal filter (same as backtest line 1293-1299)
@@ -824,13 +884,13 @@ def automatic_trading_loop():
                         
                         if not allowed:
                             logger.debug(f"⏸️ BUY signal filtered out (backtest filter): {reason}")
-                            time.sleep(10)
+                            time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                             continue
                         else:
                             logger.debug(f"✅ BUY signal passed all backtest filters: {reason}")
                     except Exception as filter_error:
                         logger.warning(f"⚠️ Could not apply backtest filters: {filter_error} - Rejecting trade for safety")
-                        time.sleep(10)
+                        time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                         continue  # Reject trade if filter check fails (safer)
                 
                 
@@ -841,13 +901,13 @@ def automatic_trading_loop():
                     # If tracked position exists, BTC belongs to that position - don't sell it!
                     if open_positions:
                         logger.debug(f"⏸️ SELL signal ignored: {len(open_positions)} tracked positions exist - BTC must stay until TP/SL")
-                        time.sleep(10)
+                        time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                         continue
                     
                     # Also check if position closing is in progress
                     if position_closing_in_progress:
                         logger.debug(f"⏸️ SELL signal ignored: Position closing in progress - wait for completion")
-                        time.sleep(10)
+                        time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                         continue
                     
                     # Only convert BTC if NO tracked positions exist (leftover BTC cleanup only)
@@ -860,10 +920,11 @@ def automatic_trading_loop():
                                 break
                         
                         if btc_balance > 0.00001:
-                            logger.warning(f"⚠️ SELL signal + leftover BTC (no tracked positions): {btc_balance:.8f} BTC - Waiting 3s then converting...")
-                            time.sleep(3)  # Wait to ensure previous orders are settled
+                            logger.warning(f"⚠️ SELL signal + leftover BTC (no tracked positions): {btc_balance:.8f} BTC - Converting immediately...")
+                            # Real-time: Minimal delay for order processing (reduced from 3s to 1s)
+                            time.sleep(1)
                             
-                            # Re-check balance
+                            # Re-check balance (real-time check)
                             account = binance_client.get_account()
                             btc_balance = 0.0
                             for balance in account['balances']:
@@ -873,7 +934,10 @@ def automatic_trading_loop():
                             
                             if btc_balance > 0.00001:  # Still have BTC
                                 try:
-                                    logger.info(f"📤 Executing SINGLE SELL signal cleanup order: {btc_balance:.8f} BTC")
+                                    # Real-time: Get current market price
+                                    ticker = binance_client.get_ticker(symbol='BTCUSDT')
+                                    current_price = float(ticker['lastPrice'])
+                                    logger.info(f"📤 Executing SINGLE SELL signal cleanup order: {btc_balance:.8f} BTC @ ${current_price:.2f}")
                                     order = binance_client.order_market_sell(
                                         symbol='BTCUSDT',
                                         quantity=f"{btc_balance:.8f}"
@@ -886,7 +950,7 @@ def automatic_trading_loop():
                     except Exception as check_error:
                         logger.debug(f"⏸️ SELL signal ignored: SHORT trades disabled (error checking balance: {check_error})")
                     
-                    time.sleep(10)
+                    time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                     continue
                 
                 logger.info(f"🎯 Auto-trading: {signal_data['signal']} signal with {signal_data['confidence']:.1%} confidence")
@@ -921,7 +985,7 @@ def automatic_trading_loop():
                         # Check minimum order size (Binance minimum is typically 10 USDT)
                         if usdt_to_spend < 10:
                             logger.warning(f"⚠️ Order size too small: {usdt_to_spend:.2f} USDT (minimum 10 USDT)")
-                            time.sleep(10)
+                            time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
                             continue
                         
                         # BACKTEST CLONE: Execute at bar close price (not current market price)
@@ -955,6 +1019,9 @@ def automatic_trading_loop():
                         # Use dynamic take-profit from signal (already calculated)
                         take_profit_price = signal_data.get('take_profit', execution_price * 1.015)  # Dynamic TP from signal
                         
+                        # Store BTC quantity for P&L calculation
+                        btc_quantity_actual = btc_quantity  # From calculation above
+                        
                         open_positions[position_id] = {
                             'side': 'BUY',
                             'entry_price': execution_price,  # BACKTEST CLONE: Use bar close price, not current price
@@ -962,7 +1029,8 @@ def automatic_trading_loop():
                             'take_profit': take_profit_price,
                             'entry_time': datetime.now(),
                             'order_id': order['orderId'],
-                            'entry_confidence': confidence  # Store confidence for logging
+                            'entry_confidence': confidence,  # Store confidence for logging
+                            'quantity': btc_quantity_actual  # Store BTC quantity for P&L calculation
                         }
                         
                         logger.info(f"📊 Position tracked: {position_id} - Entry: {execution_price:.2f} (bar close), SL: {stop_loss_price:.2f}, TP: {take_profit_price:.2f}, Confidence: {confidence:.1%}")
@@ -973,10 +1041,10 @@ def automatic_trading_loop():
             else:
                 logger.debug(f"🔍 Auto-trading: Signal {signal_data['signal']} with {signal_data['confidence']:.1%} confidence - No action")
             
-            # BACKTEST CLONE: Wait longer to match backtest frequency (step_size = 6 bars = 30 minutes)
-            # Since we evaluate 1 bar out of 6, we wait for next bar (5 minutes = 300 seconds)
-            # But check more frequently for position management (every 30 seconds)
-            time.sleep(30)  # Check every 30 seconds for position management, but only evaluate signals at step_size intervals
+            # REAL-TIME TP/SL DETECTION: Check position management very frequently (like TradingView)
+            # Signal evaluation still follows step_size (every 6 bars = 30 minutes)
+            # But TP/SL is checked every 1-2 seconds for immediate detection
+            time.sleep(2)  # Check TP/SL every 2 seconds for real-time precision (TradingView style)
             
         except Exception as e:
             logger.error(f"❌ Auto-trading loop error: {e}")
@@ -1493,23 +1561,68 @@ async def get_open_positions():
 
 @app.get("/api/trade-history")
 async def get_trade_history():
-    """Get trade history"""
+    """Get trade history with TP/SL info and P&L"""
     if not binance_client:
         raise HTTPException(status_code=400, detail="Binance API not configured")
     
     try:
         trades = binance_client.get_my_trades(symbol='BTCUSDT', limit=100)
         
+        # Get completed trades history (with TP/SL and P&L info)
+        global completed_trades_history
+        
+        # Create a mapping of exit order IDs to completed trades
+        completed_trades_map = {}
+        for ct in completed_trades_history:
+            if ct.get('exit_order_id'):
+                completed_trades_map[ct['exit_order_id']] = ct
+        
         trade_history = []
         for trade in trades:
-            trade_history.append({
+            trade_data = {
+                "id": str(trade['id']),
                 "symbol": trade['symbol'],
                 "side": trade['isBuyer'] and 'BUY' or 'SELL',
                 "quantity": float(trade['qty']),
                 "price": float(trade['price']),
                 "commission": float(trade['commission']),
-                "time": datetime.fromtimestamp(trade['time'] / 1000).isoformat()
-            })
+                "commission_asset": trade.get('commissionAsset', 'USDT'),
+                "time": int(trade['time']),
+                "is_buyer": trade['isBuyer'],
+                "is_maker": trade.get('isMaker', False),
+                # Add TP/SL and P&L info if available
+                "exit_reason": None,
+                "realized_pnl": None,
+                "realized_pnl_percent": None,
+                "unrealized_pnl": None,
+                "entry_price": None,
+                "exit_price": None,
+                "stop_loss": None,
+                "take_profit": None
+            }
+            
+            # Try to match with completed trade history using order ID
+            # For SELL trades (exits), match with exit_order_id
+            # For BUY trades (entries), we could match with entry order_id if needed
+            if trade['isBuyer'] == False:  # SELL trade = exit
+                order_id = str(trade.get('orderId', ''))
+                if order_id in completed_trades_map:
+                    ct = completed_trades_map[order_id]
+                    trade_data.update({
+                        "exit_reason": ct.get('exit_reason'),  # 'stop_loss' or 'take_profit'
+                        "realized_pnl": ct.get('realized_pnl'),
+                        "realized_pnl_percent": ct.get('realized_pnl_percent'),
+                        "unrealized_pnl": ct.get('unrealized_pnl_at_entry'),
+                        "entry_price": ct.get('entry_price'),
+                        "exit_price": ct.get('exit_price'),
+                        "stop_loss": ct.get('stop_loss'),
+                        "take_profit": ct.get('take_profit')
+                    })
+            
+            trade_history.append(trade_data)
+        
+        # Sort by time (newest first)
+        trade_history.sort(key=lambda x: x['time'], reverse=True)
         
         return trade_history
         
