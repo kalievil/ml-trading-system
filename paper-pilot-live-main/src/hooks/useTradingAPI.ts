@@ -5,6 +5,7 @@ import { useState, useEffect } from "react";
 function getApiBaseUrl(): string {
   // First check environment variable
   if (import.meta.env.VITE_API_URL) {
+    console.log(`🔧 Using VITE_API_URL from env: ${import.meta.env.VITE_API_URL}`);
     return import.meta.env.VITE_API_URL;
   }
   
@@ -12,23 +13,25 @@ function getApiBaseUrl(): string {
   if (typeof window !== 'undefined') {
     const hostname = window.location.hostname;
     const protocol = window.location.protocol;
+    const port = window.location.port;
     
     // If not localhost, use the same hostname with port 8000
     if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
-      return `${protocol}//${hostname}:8000`;
+      const apiUrl = `${protocol}//${hostname}:8000`;
+      console.log(`🌐 Auto-detected API URL: ${apiUrl} (frontend: ${hostname}:${port})`);
+      return apiUrl;
+    } else {
+      console.log(`🔧 Local development detected (hostname: ${hostname}), using localhost:8000`);
     }
   }
   
   // Fallback to localhost for local development
-  return "http://localhost:8000";
+  const fallbackUrl = "http://localhost:8000";
+  console.log(`🔧 Using fallback API URL: ${fallbackUrl}`);
+  return fallbackUrl;
 }
 
 const API_BASE_URL = getApiBaseUrl();
-
-// Log the API URL for debugging (only once at module load)
-if (typeof window !== 'undefined') {
-  console.log(`🌐 API Base URL detected: ${API_BASE_URL} (from hostname: ${window.location.hostname})`);
-}
 
 export interface TradingSignal {
   symbol: string;
