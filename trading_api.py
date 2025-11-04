@@ -576,11 +576,10 @@ def close_position_sync(position_id, reason):
                 # Binance minimum is typically 0.00001 BTC
                 if btc_balance_free >= 0.00001:
                     logger.info(f"📤 Executing SINGLE market SELL order: {btc_balance_free:.8f} BTC (position: {position_id})")
-            order = binance_client.order_market_sell(
-                symbol='BTCUSDT',
+                    order = binance_client.order_market_sell(
+                        symbol='BTCUSDT',
                         quantity=f"{btc_balance_free:.8f}"  # Use 8 decimals for precision
                     )
-                    
                     logger.info(f"✅ Position closed: {position_id} - {reason} - Sold {btc_balance_free:.8f} BTC - Order ID: {order.get('orderId', 'N/A')}")
                 else:
                     logger.warning(f"⚠️ BTC balance too small to sell: {btc_balance_free:.8f} BTC (minimum 0.00001)")
