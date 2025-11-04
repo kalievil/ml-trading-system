@@ -904,6 +904,36 @@ def automatic_trading_loop():
                             continue
                         else:
                             logger.info(f"✅ BUY signal passed all backtest filters: {reason}")
+                        
+                        # CRITICAL FIX: Add trend/momentum filter to block BUY during downtrend
+                        # This prevents buying when market is going down (common issue in live trading)
+                        if current_idx >= 3:
+                            current_price = float(df_renamed.iloc[current_idx]['close'])
+                            price_3_bars_ago = float(df_renamed.iloc[current_idx - 3]['close'])
+                            price_5_bars_ago = float(df_renamed.iloc[current_idx - 5]['close']) if current_idx >= 5 else price_3_bars_ago
+                            
+                            # Calculate short-term momentum (last 3-5 bars = 15-25 minutes)
+                            momentum_3 = (current_price - price_3_bars_ago) / price_3_bars_ago
+                            momentum_5 = (current_price - price_5_bars_ago) / price_5_bars_ago if current_idx >= 5 else momentum_3
+                            
+                            # BLOCK BUY if strong downtrend: price dropped > 0.3% in last 3-5 bars
+                            if momentum_3 < -0.003 or momentum_5 < -0.005:  # -0.3% or -0.5% drop
+                                logger.warning(f"⏸️ BUY signal REJECTED: Strong downtrend detected (momentum_3={momentum_3*100:.2f}%, momentum_5={momentum_5*100:.2f}%)")
+                                logger.warning(f"   Current: ${current_price:.2f}, 3 bars ago: ${price_3_bars_ago:.2f}, 5 bars ago: ${price_5_bars_ago:.2f}")
+                                time.sleep(2)
+                                continue
+                            
+                            # Also check if price is making lower lows (downtrend pattern)
+                            recent_lows = df_renamed.iloc[max(0, current_idx-5):current_idx+1]['low'].values
+                            if len(recent_lows) >= 3:
+                                # Check if we're making lower lows (downtrend)
+                                if current_price < np.min(recent_lows[:-1]):  # Current price is below recent lows
+                                    logger.warning(f"⏸️ BUY signal REJECTED: Making lower lows (downtrend pattern)")
+                                    logger.warning(f"   Current: ${current_price:.2f}, Recent low: ${np.min(recent_lows[:-1]):.2f}")
+                                    time.sleep(2)
+                                    continue
+                            
+                            logger.info(f"✅ Trend check passed: momentum_3={momentum_3*100:.2f}%, momentum_5={momentum_5*100:.2f}%")
                     except Exception as filter_error:
                         logger.warning(f"⚠️ Could not apply backtest filters: {filter_error} - Rejecting trade for safety")
                         time.sleep(2)  # Real-time: Quick retry to check TP/SL and new signals
