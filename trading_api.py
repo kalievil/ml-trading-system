@@ -576,8 +576,8 @@ def close_position_sync(position_id, reason):
                 # Binance minimum is typically 0.00001 BTC
                 if btc_balance_free >= 0.00001:
                     logger.info(f"📤 Executing SINGLE market SELL order: {btc_balance_free:.8f} BTC (position: {position_id})")
-                    order = binance_client.order_market_sell(
-                        symbol='BTCUSDT',
+            order = binance_client.order_market_sell(
+                symbol='BTCUSDT',
                         quantity=f"{btc_balance_free:.8f}"  # Use 8 decimals for precision
                     )
                     
@@ -1034,8 +1034,9 @@ def automatic_trading_loop():
                         stop_loss_pct = getattr(ml_system, 'long_stop_loss_pct', 0.006)
                         # BACKTEST CLONE: Use execution price (bar close) for SL/TP calculation
                         stop_loss_price = execution_price * (1 - stop_loss_pct)
-                        # Use dynamic take-profit from signal (already calculated)
-                        take_profit_price = signal_data.get('take_profit', execution_price * 1.015)  # Dynamic TP from signal
+                        # FIXED TAKE-PROFIT: Always 0.5% regardless of confidence (for live trading)
+                        fixed_tp_pct = 0.005  # 0.5% fixed TP
+                        take_profit_price = execution_price * (1 + fixed_tp_pct)
                         
                         # Store BTC quantity for P&L calculation
                         btc_quantity_actual = btc_quantity  # From calculation above
@@ -1195,9 +1196,9 @@ def get_ml_signal():
         # No leverage in TargetedLongLossFixSystem, use 1.0
         leverage = 1.0
         stop_loss = current_price * (1 - ml_system.long_stop_loss_pct)
-        # Use dynamic take-profit based on confidence
-        dynamic_tp = ml_system._calculate_dynamic_take_profit(confidence, 'LONG')
-        take_profit = current_price * (1 + dynamic_tp)
+        # FIXED TAKE-PROFIT: Always 0.5% regardless of confidence (for live trading)
+        fixed_tp_pct = 0.005  # 0.5% fixed TP
+        take_profit = current_price * (1 + fixed_tp_pct)
         
         # Calculate Step Size Evaluation info
         # This shows which bar is being evaluated (always "1 / 6" when evaluating, or "waiting X / 6" when not)

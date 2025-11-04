@@ -55,8 +55,8 @@ class TargetedLongLossFixSystem:
         self.long_resistance_distance = 0.002  # Allow closer to resistance (2% - more lenient)
         # Risk/Reward Ratio: Best combination from analysis
         self.long_stop_loss_pct = 0.006  # UPDATED stop loss: 0.6% (original best performance)
-        self.long_take_profit_base = 0.020  # Base take profit: 2.0% (best performer)
-        self.long_take_profit_max = 0.035  # MAX take profit: 3.5% (for high confidence trades)
+        self.long_take_profit_base = 0.005  # Base take profit: 0.5% (REDUCED from 2.0% for live trading)
+        self.long_take_profit_max = 0.010  # MAX take profit: 1.0% (REDUCED from 3.5% for live trading)
         
         # SHORT Parameters - BEST COMBINATION (from analysis of all results)
         # Strategy: Quality SHORT trades with optimal filters
@@ -1370,27 +1370,37 @@ class TargetedLongLossFixSystem:
             return self.base_position_size  # 35% for base confidence
     
     def _calculate_dynamic_take_profit(self, confidence, direction):
-        """Calculate DYNAMIC take-profit based on confidence (for higher returns)"""
+        """Calculate DYNAMIC take-profit based on confidence (for higher returns)
+        
+        Uses proportional scaling from minimum confidence threshold (42%) to 100%.
+        This ensures all signals get a TP proportional to their confidence level.
+        """
         if direction == 'LONG':
             # Scale take-profit from base to max based on confidence
-            # Higher confidence = higher take-profit target
-            if confidence >= 0.85:
-                tp = self.long_take_profit_max  # 3.0% for very high confidence
-            elif confidence >= 0.75:
-                tp = self.long_take_profit_base + (self.long_take_profit_max - self.long_take_profit_base) * 0.6  # ~2.5%
-            elif confidence >= 0.65:
-                tp = self.long_take_profit_base + (self.long_take_profit_max - self.long_take_profit_base) * 0.3  # ~2.1%
-            else:
-                tp = self.long_take_profit_base  # 1.8% base
+            # Proportional scaling: 42% (min) → TP base, 100% → TP max
+            min_confidence = self.long_confidence_threshold  # 0.42 (42%)
+            max_confidence = 1.0  # 100%
+            
+            # Clamp confidence to valid range
+            confidence_clamped = max(min_confidence, min(confidence, max_confidence))
+            
+            # Calculate proportion: (confidence - min) / (max - min)
+            # This gives 0.0 at min_confidence and 1.0 at max_confidence
+            proportion = (confidence_clamped - min_confidence) / (max_confidence - min_confidence)
+            
+            # Interpolate linearly from base to max
+            tp = self.long_take_profit_base + (self.long_take_profit_max - self.long_take_profit_base) * proportion
+            
         else:  # SHORT
-            if confidence >= 0.85:
-                tp = self.short_take_profit_max  # 4.0% for very high confidence
-            elif confidence >= 0.75:
-                tp = self.short_take_profit_base + (self.short_take_profit_max - self.short_take_profit_base) * 0.6  # ~3.4%
-            elif confidence >= 0.65:
-                tp = self.short_take_profit_base + (self.short_take_profit_max - self.short_take_profit_base) * 0.3  # ~2.9%
-            else:
-                tp = self.short_take_profit_base  # 2.4% base
+            # Same proportional scaling for SHORT trades
+            min_confidence = self.short_confidence_threshold  # 0.42 (42%)
+            max_confidence = 1.0  # 100%
+            
+            confidence_clamped = max(min_confidence, min(confidence, max_confidence))
+            proportion = (confidence_clamped - min_confidence) / (max_confidence - min_confidence)
+            
+            tp = self.short_take_profit_base + (self.short_take_profit_max - self.short_take_profit_base) * proportion
+            
         return tp
 
     def _open_long_position(self, portfolio, price, time, confidence, position_size):
